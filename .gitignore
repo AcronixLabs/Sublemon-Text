@@ -1,0 +1,11 @@
+# Extracted third-party Sublime Text installation (never distribute it)
+/sublime_text/
+
+# Sublime Text distribution archive (never distribute it)
+/sublime_text_build_4215_x64.tar.xz
+
+# Generated binary disassembly listings
+/sublime_text/disassembly/
+
+# Rust build output
+/target/
