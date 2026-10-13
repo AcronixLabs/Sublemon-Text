@@ -81,12 +81,17 @@ This is a staged plan. Each milestone should leave a runnable, coherent applicat
 - Add import/export and safe-mode behavior for diagnosing user customizations.
 - Maintain a dependency/license inventory and extension trust model.
 
-### 10. Accessibility, reliability, and performance
+### 10. Accessibility, reliability, and performance — in progress
 
 - Audit keyboard-only workflows, screen-reader/accessibility tree exposure, contrast, scaling, IME, and platform conventions.
-- Profile startup, typing latency, rendering, memory use, indexing, and large-file behavior.
-- Add crash recovery and autosave/recovery policy with clear user expectations.
-- Exercise Linux, Windows, and macOS builds; account for file dialogs, clipboard, fonts, and application identity on each platform.
+- Profile before redesign: build optimized binaries, record cold/warm startup, idle CPU, typing-to-frame p50/p95, scroll frame times, and resident memory on fixed 1 MiB, 10 MiB, and 100 MiB documents. Capture CPU flamegraphs and allocator/RSS snapshots on Linux; repeat on each supported OS before platform claims.
+- Set initial targets on the reference machine: idle CPU below 1% of one core after settling; p95 keystroke-to-visible-frame below 16 ms for 10 MiB; 100 MiB open without UI stalls over 100 ms; and avoid retaining multiple full-size copies of a document. Record hardware, OS, build profile, and results so changes can be compared.
+- First remove full-buffer work from the frame path: virtualize visible editor and gutter rows, cache line layout/width and syntax results by document revision, and update only affected lines after edits. Use incremental parsing/highlighting and avoid building full-document `LayoutJob`s on every redraw.
+- If profiling shows egui's `TextEdit` or contiguous `String` remains the limiting factor, prototype a rope/piece-table buffer with viewport-only shaping and rendering. Compare it against the current editor on the same workload before replacing the editing engine; preserve Unicode, selection, IME, accessibility, and undo behavior.
+- Move directory walks, project indexing, and expensive file metadata work off the UI thread with cancellation, bounded work queues, and cache invalidation. Debounce/coalesce LSP change notifications and avoid copying whole buffers for transient diagnostics or UI state.
+- Treat GPU rendering as a way to accelerate drawing only. It will not speed up text scanning, syntax parsing, disk I/O, or allocations; measure CPU and GPU paths separately and retain a usable fallback where supported.
+- Add crash recovery/autosave policy with clear user expectations after responsiveness and data integrity are measured.
+- Exercise Linux, Windows, and macOS builds; account for native file dialogs, clipboard, fonts, and application identity on each platform.
 
 ### 11. Packaging and release
 
@@ -102,12 +107,12 @@ This is a staged plan. Each milestone should leave a runnable, coherent applicat
 | 1. Native app foundation | Complete | Cargo project, eframe shell, in-memory scratch editing, and supplied icon are implemented; `cargo check --offline` passes and the initial GUI was launched. |
 | 2. Document/file model | In progress | Added a standalone UTF-8 document model, normalized editing with detected line-ending preservation, dirty tabs, path-based Open/Save/Save As/Revert, read-only protection, modified-file close prompts, and disk-change/overwrite guards. The current path prompt is a basic text-entry dialog; native file pickers, richer encoding support, and dedicated model tests remain. |
 | 3. Editing engine | In progress | Prototyped around egui's multiline code editor: Unicode-safe character-indexed caret/selection, navigation, clipboard shortcuts, built-in keyboard undo/redo, Tab and Shift+Tab indentation, selectable undo/redo/select-all menu actions, configurable wrapping, and Enter auto-indentation. Editor state is keyed by stable document identity. Large-file profiling, IME/accessibility validation, structural editing commands, and a purpose-built engine decision remain. |
-| 4. Workspace UI | In progress | User requested pixel-level visual fidelity to the supplied target screenshot. The app opens the project README and AGENTS files, shows an expandable project tree beside editor-only tabs, wraps and lightly highlights Markdown, and uses sampled target colors and panel proportions. Removed the nonfunctional text-as-minimap pane after it consumed most of the editor width; the sidebar divider remains draggable, starts at 43% of the viewport, and can collapse to zero width. Moved the gutter into the editor workspace below the tab strip so the tabs align at the sidebar edge as in the reference. Bundled the MIT-licensed Material Icon Theme v5.39.0 pack (904 source SVGs and 48 px PNG textures), with 3,536 generated filename, extension, and folder associations for the project tree. Added `scripts/ui_screenshot_test.py` plus `SCREENSHOT_TESTING.md`; the supplied pre-change screenshot scored 41.28% similarity at tolerance 16, below the 80% target. |
+| 4. Workspace UI | In progress | User requested pixel-level visual fidelity to the supplied target screenshot. The app opens the project README and AGENTS files, shows an expandable project tree beside editor-only tabs, wraps and lightly highlights Markdown, and uses sampled target colors and panel proportions. Removed the nonfunctional text-as-minimap pane after it consumed most of the editor width; the sidebar divider remains draggable, starts at 43% of the viewport, and can collapse to zero width. Moved the gutter into the editor workspace below the tab strip so the tabs align at the sidebar edge as in the reference. Bundled the MIT-licensed Material Icon Theme v5.39.0 pack (904 source SVGs and 48 px PNG textures), with 3,536 generated filename, extension, and folder associations for the project tree. The tree uses a virtualized scroll area and short-lived directory cache. Added `scripts/ui_screenshot_test.py` plus `SCREENSHOT_TESTING.md`; the supplied pre-change screenshot scored 41.28% similarity at tolerance 16, below the 80% target. |
 | 5. Search/navigation | Not started | |
-| 6. Language awareness | Not started | |
-| 7. Projects/persistence | Not started | |
-| 8. Tasks/Git/LSP | Not started | |
-| 9. Extensibility/config | Not started | |
+| 6. Language awareness | In progress | Added all 48 package folders from the licensed sublimehq/Packages snapshot and a Syntect-backed syntax renderer using an independently authored Sublemon palette. The bundled snapshot has 202 syntax files; 78 parse directly in Syntect, with its defaults providing fallback highlighting for others. Package code is not executed. LSP supports definition/declaration/type-definition/implementation, references, hover, and completion; snippets, rename, semantic tokens, and code actions remain. |
+| 7. Projects/persistence | In progress | Open-folder and multi-root folder import are available. Primary-root `.sublemon.json` persists workspace roots and the manually launched language-server command. Session/window restoration and richer project settings remain. |
+| 8. Tasks/Git/LSP | In progress | Added a configurable stdio LSP client with JSON-RPC framing, lifecycle and server-request replies, workspace-folder updates, file synchronization, diagnostics, navigation requests/results and history, hover, and completion. Build tasks, code actions, rename, semantic tokens, and richer diagnostic presentation remain. |
+| 9. Extensibility/config | In progress | Added `.sublime-package` ZIP archive import as data: safe extraction into Git-ignored `.sublemon/packages/`, size/count/path/link checks, and workspace-tree access. Package code execution and Sublime-specific APIs are not supported. Broader settings and extension APIs remain. |
 | 10. Reliability/performance | Not started | |
 | 11. Packaging/release | Not started | |
 

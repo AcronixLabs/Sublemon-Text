@@ -1,0 +1,33 @@
+%YAML 1.2
+---
+scope: source.sql.embedded.ruby
+version: 2
+hidden: true
+
+extends: Packages/SQL/SQL.sublime-syntax
+
+contexts:
+
+  comments:
+    # Notes:
+    # 1. comments are included in `prototype` thus apply everywhere
+    # 2. prepend patterns here to ensure Ruby interpolation `#{...}` takes
+    #    precedence over any kind of comment (e.g. number-sighn comments).
+    - meta_prepend: true
+    - include: Ruby.sublime-syntax#escaped-char
+    - include: Ruby.sublime-syntax#embedded-ruby
+
+  comment-prototype:
+    - meta_prepend: true
+    - include: Ruby.sublime-syntax#escaped-char
+    - include: Ruby.sublime-syntax#embedded-ruby
+
+  identifier-prototype:
+    - meta_prepend: true
+    - include: Ruby.sublime-syntax#escaped-char
+    - include: Ruby.sublime-syntax#embedded-ruby
+
+  string-prototype:
+    - meta_prepend: true
+    - include: Ruby.sublime-syntax#escaped-char
+    - include: Ruby.sublime-syntax#interpolated-ruby

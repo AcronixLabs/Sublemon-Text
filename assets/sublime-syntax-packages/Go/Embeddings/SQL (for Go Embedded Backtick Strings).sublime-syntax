@@ -1,0 +1,26 @@
+%YAML 1.2
+---
+name: SQL inside Go backtick string
+scope: source.sql.go-embedded-backtick-string
+version: 2
+hidden: true
+
+extends: Packages/SQL/SQL.sublime-syntax
+
+contexts:
+
+  prototype:
+    - meta_prepend: true
+    - include: scope:source.go#match-raw-text-content
+
+  comment-prototype:
+    - meta_prepend: true
+    - include: scope:source.go#match-raw-text-content
+
+  identifier-prototype:
+    - meta_prepend: true
+    - include: scope:source.go#match-raw-text-content
+
+  string-prototype:
+    - meta_prepend: true
+    - include: scope:source.go#match-raw-string-content

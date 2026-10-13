@@ -1,0 +1,17 @@
+%YAML 1.2
+---
+name: SQL
+scope: source.sql
+version: 2
+
+extends: Packages/SQL/MySQL.sublime-syntax
+
+file_extensions:
+  - sql
+  - ddl
+  - dml
+
+first_line_match: |-
+  (?xi:
+    ^ \s* -- .*? -\*- .*? \bsql\b .*? -\*-  # editorconfig
+  )

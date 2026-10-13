@@ -1,0 +1,84 @@
+%YAML 1.2
+---
+# Highlight .git files.
+
+name: Git Link
+scope: text.git.link
+version: 2
+
+file_extensions:
+  - .git
+
+first_line_match: '^\s*gitdir\s*:'
+
+contexts:
+
+  main:
+    - include: Git Common.sublime-syntax#comments-line
+    - include: gitdir
+
+  gitdir:
+    - match: \bgitdir\b
+      scope: keyword.other.gitdir.git.link
+      push: expect-separator
+    - match: \S+
+      scope: invalid.illegal.gitdir-expected.git.link
+
+  expect-separator:
+    - meta_scope: meta.mapping.key.git.link
+    - match: (?=:)
+      set: separator
+    - match: \S
+      scope: invalid.illegal.separator-expected.git.link
+
+  separator:
+    - meta_scope: meta.mapping.git.link
+    - match: ':'
+      scope: punctuation.separator.key-value.git.link
+      set: [mapping-value-meta, expect-path]
+    - match: \n
+      pop: 1
+
+  expect-path:
+    - match: (?=\S)   # path starts with the first non-space character
+      set: [path, path-start]
+    - match: \n
+      pop: 1
+
+  mapping-value-meta:
+    - meta_content_scope: meta.mapping.value.git.link
+    - match: ''
+      pop: 1
+
+  path:
+    - meta_content_scope: meta.path.git string.unquoted.git
+    - match: $
+      pop: 1
+    - match: '[\\/]'
+      scope: punctuation.separator.path.git
+      push: path-dir-pattern
+    - match: '[*?]'
+      scope: invalid.illegal.path.git
+
+  path-start:
+    # windows drive letter and separator
+    - match: '[A-Za-z](:)(?=[\\/])'
+      captures:
+        1: punctuation.separator.path.git
+      pop: 1
+    # homedir tilde operator
+    - match: ~(?=/)
+      scope: variable.language.environment.home.git
+      pop: 1
+    # any other directory pattern
+    - include: path-dir-pattern
+
+  path-dir-pattern:
+    - match: \.\.(?=[\\/])
+      scope: constant.other.path.parent.git
+      pop: 1
+    - match: \.(?=[\\/])
+      scope: constant.other.path.self.git
+      pop: 1
+    - match: ''
+      pop: 1

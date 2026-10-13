@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0">
+<dict>
+	<key>name</key>
+	<string>DOT - Indentation Rules</string>
+	<key>scope</key>
+	<string>source.dot</string>
+	<key>settings</key>
+	<dict>
+		<key>decreaseIndentPattern</key>
+		<string><![CDATA[(?x)
+		^ (.*\*/)? [[:blank:]]* \} .* $
+		]]></string>
+		<key>increaseIndentPattern</key>
+		<string><![CDATA[(?x)
+		^ .* \{ [^}"']* $
+		]]></string>
+		<key>unIndentedLinePattern</key>
+		<string><![CDATA[(?x)
+		^ [[:blank:]]* ( ( /\* | .* \*/ | // | \# ) .* )? $
+		]]></string>
+	</dict>
+</dict>
+</plist>

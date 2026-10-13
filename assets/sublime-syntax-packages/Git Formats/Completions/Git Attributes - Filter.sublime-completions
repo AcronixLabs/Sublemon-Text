@@ -1,0 +1,5 @@
+{
+    "scope": "(meta.mapping.expect-value | meta.mapping.value) & meta.attribute.builtin.filter.git.attributes",
+    "completions": [
+    ]
+}

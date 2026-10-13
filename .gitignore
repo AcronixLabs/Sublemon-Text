@@ -9,3 +9,6 @@
 
 # Rust build output
 /target/
+
+# Imported third-party package archives are user data, not Sublemon source
+/.sublemon/packages/

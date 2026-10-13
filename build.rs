@@ -24,4 +24,5 @@ fn main() {
     generated.push_str("];\n");
     fs::write(out_dir.join("material_icon_pngs.rs"), generated).expect("write icon table");
     println!("cargo:rerun-if-changed=assets/material-icon-theme/associations.tsv");
+    println!("cargo:rerun-if-changed=assets/sublemon-syntaxes.packdump");
 }

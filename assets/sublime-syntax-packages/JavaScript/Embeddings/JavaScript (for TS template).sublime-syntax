@@ -1,0 +1,28 @@
+%YAML 1.2
+---
+# http://www.sublimetext.com/docs/syntax.html
+# highlight tagged template strings
+scope: source.js.ts-template
+version: 2
+hidden: true
+
+extends: Packages/JavaScript/JavaScript (Plain).sublime-syntax
+
+variables:
+    tagged_template_quote_begin: \\\`
+    tagged_template_quote_end: \\\`
+
+contexts:
+
+  main:
+    - include: script
+
+  prototype:
+    - meta_prepend: true
+    - include: scope:source.ts.plain#literal-string-template-end-ahead
+    - include: scope:source.ts.plain#text-interpolations
+
+  string-content:
+    - meta_prepend: true
+    - include: scope:source.ts.plain#literal-string-template-end-ahead
+    - include: scope:source.ts.plain#string-interpolations

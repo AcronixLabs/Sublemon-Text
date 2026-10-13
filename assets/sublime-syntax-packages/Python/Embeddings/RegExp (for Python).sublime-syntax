@@ -1,0 +1,137 @@
+%YAML 1.2
+---
+name: Regular Expressions (Python)
+scope: source.regexp.python
+version: 2
+hidden: true
+
+extends: Packages/Regular Expressions/RegExp (Basic).sublime-syntax
+
+variables:
+  # escapes
+  known_char_escape: \\(?:[0-7]{3}|x\{\h{1,7}\}|x\h\h)
+
+  # modifiers
+  activate_x_mode: (?:\?[imsLua]*x[ixmsLua]*(?:-[imsLua]+)?)
+  deactivate_x_mode: (?:\?[imsLua]*-[imsLua]*x[imxsLua]*)
+  other_modifiers: \?(?:[ixmsLua]*-)?[ixmsLua]+
+
+  # quantifiers
+  ranged_quantifier: '{{brace_start}}\d+(?:,\d*)?{{brace_end}}'
+  brace_start: \{
+  brace_end: \}
+
+contexts:
+  base:
+    - meta_prepend: true
+    - match: (#)[^]\[(){}^$+*?\\|"']*$\n?
+      # Restrictive allowed chars after comment punctuation to avoid false positives,
+      # since the availability of comments depend on regexp flags.
+      scope: comment.line.number-sign.regexp
+      captures:
+        1: punctuation.definition.comment.regexp
+
+  group-start:
+    - meta_prepend: true
+    # named capture group back-reference assertion (lookahead)
+    - match: \?P=
+      scope: keyword.other.backref-and-recursion.regexp
+      set: group-assertion-name
+    # named capture group back-reference match (for: regex package)
+    - match: \?&
+      scope: keyword.other.backref-and-recursion.regexp
+      set: group-capturing-name
+    # conditional capture group back-reference
+    - match: \?(\()
+      captures:
+        1: punctuation.definition.capture-group-name.begin.regexp
+      set: group-conditional-name
+    # named capture group definition
+    - match: \?P(<)
+      captures:
+        1: punctuation.definition.capture-group-name.begin.regexp
+      set: group-definition-name
+
+  group-assertion-name:
+    - meta_content_scope: keyword.other.backref-and-recursion.regexp variable.other.capture-group.regexp
+    - match: \)
+      scope: punctuation.section.group.end.regexp
+      pop: 3
+
+  group-capturing-name:
+    - meta_content_scope: keyword.other.backref-and-recursion.regexp variable.other.capture-group.regexp
+    - match: \)
+      scope: punctuation.section.group.end.regexp
+      pop: 3
+
+  group-conditional-name:
+    - meta_scope: keyword.other.backref-and-recursion.regexp
+    - meta_content_scope: variable.other.capture-group.regexp
+    - match: \)
+      scope: punctuation.definition.capture-group-name.end.regexp
+      pop: 1
+
+  group-definition-name:
+    - meta_scope: keyword.other.backref-and-recursion.regexp
+    - meta_content_scope: entity.name.capture-group.regexp
+    - match: \>
+      scope: punctuation.definition.capture-group-name.end.regexp
+      pop: 1
+
+  backrefs:
+    - meta_prepend: true
+    - match: \\g(<)
+      captures:
+        1: punctuation.definition.capture-group-name.begin.regexp
+      push: backref-name
+
+  backref-name:
+    - meta_scope: keyword.other.backref-and-recursion.regexp
+    - meta_content_scope: variable.other.capture-group.regexp
+    - match: \>
+      scope: punctuation.definition.capture-group-name.end.regexp
+      pop: 1
+
+  literals:
+    - meta_prepend: true
+    # no illegal parentheses in concatenated patterns
+    - match: \]
+      scope: punctuation.definition.set.end.regexp
+    - match: \)
+      scope: punctuation.section.group.end.regexp
+
+  quantifiers:
+    - match: (?={{brace_start}}[\d{])
+      branch_point: ranged-quantifier
+      branch:
+        - ranged-quantifier
+        - ranged-quantifier-fallback
+    - match: '{{character_quantifier}}{{lazy_or_possessive}}'
+      scope: keyword.operator.quantifier.regexp
+      push: maybe-unexpected-quantifiers
+
+  ranged-quantifier:
+    - meta_include_prototype: false
+    - match: '{{brace_start}}'
+      scope: keyword.operator.quantifier.regexp
+      set: ranged-quantifier-min
+
+  ranged-quantifier-min:
+    - meta_content_scope: keyword.operator.quantifier.regexp
+    - match: ','
+      scope: keyword.operator.quantifier.regexp
+      set: ranged-quantifier-max
+    - include: ranged-quantifier-max
+
+  ranged-quantifier-max:
+    - meta_content_scope: keyword.operator.quantifier.regexp
+    - match: '{{brace_end}}'
+      scope: keyword.operator.quantifier.regexp
+      set: maybe-unexpected-quantifiers
+    - match: (?!\d)
+      fail: ranged-quantifier
+
+  ranged-quantifier-fallback:
+    - meta_include_prototype: false
+    - match: '{{brace_start}}'
+      pop: 1

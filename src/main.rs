@@ -2,6 +2,9 @@
 
 mod app;
 mod document;
+mod lsp;
+mod sublime_package;
+mod syntax;
 
 use eframe::egui;
 
@@ -15,6 +18,8 @@ fn main() -> eframe::Result<()> {
 
     let options = eframe::NativeOptions {
         viewport,
+        // Render egui's UI through wgpu so supported systems can use hardware acceleration.
+        renderer: eframe::Renderer::Wgpu,
         ..Default::default()
     };
 

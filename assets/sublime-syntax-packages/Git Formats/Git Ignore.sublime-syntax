@@ -1,0 +1,33 @@
+%YAML 1.2
+---
+# Syntax based on documentation here:
+# https://git-scm.com/docs/gitignore
+
+# Examples: https://github.com/github/gitignore
+
+name: Git Ignore
+scope: text.git.ignore
+version: 2
+
+file_extensions:
+  - gitignore             # *.gitignore
+
+hidden_file_extensions:
+  - .gitignore            # ~/.gitignore
+  - exclude               # .git/info/exclude
+  - sparse-checkout       # .git/info/sparse-checkout
+
+contexts:
+
+  main:
+    - include: Git Common.sublime-syntax#comments
+    - match: '!|(?=\S)'   # optional pattern negation
+      scope: keyword.operator.logical.path.glob.git.ignore
+      push: [pattern-content, Git Common.sublime-syntax#fnmatch-start]
+
+  pattern-content:
+    - meta_scope: string.unquoted.git.ignore entity.name.pattern.git.ignore
+    - match: $
+      pop: 1
+    - include: Git Common.sublime-syntax#fnmatch-unquoted-body
+

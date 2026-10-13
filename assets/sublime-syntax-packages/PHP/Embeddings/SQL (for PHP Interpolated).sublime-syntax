@@ -1,0 +1,31 @@
+%YAML 1.2
+---
+scope: source.sql.interpolated.php
+version: 2
+hidden: true
+
+extends: Packages/SQL/SQL.sublime-syntax
+
+contexts:
+
+  main:
+    - meta_prepend: true
+    # prevent stray bracket highlighting
+    - match: \)
+      scope: punctuation.section.group.end.sql
+
+  prototype:
+    - meta_append: true
+    - include: Packages/PHP/PHP Source.sublime-syntax#interpolations
+
+  comment-prototype:
+    - meta_append: true
+    - include: Packages/PHP/PHP Source.sublime-syntax#interpolations
+
+  identifier-prototype:
+    - meta_prepend: true
+    - include: Packages/PHP/PHP Source.sublime-syntax#interpolations
+
+  string-prototype:
+    - meta_prepend: true
+    - include: Packages/PHP/PHP Source.sublime-syntax#string-interpolations

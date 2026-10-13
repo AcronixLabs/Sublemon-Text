@@ -1,19 +1,57 @@
 use crate::document::Document;
+use crate::lsp::{LspClient, offset_from_position, uri_to_path};
+use crate::sublime_package::extract_package;
 use eframe::egui;
 use std::{
     collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
     sync::OnceLock,
+    time::Instant,
 };
 
-const UI: egui::Color32 = egui::Color32::from_rgb(52, 51, 52);
-const SIDEBAR: egui::Color32 = egui::Color32::from_rgb(34, 37, 41);
-const STATUS: egui::Color32 = egui::Color32::from_rgb(45, 48, 54);
-const EDITOR: egui::Color32 = egui::Color32::from_rgb(49, 54, 64);
-const GUTTER: egui::Color32 = egui::Color32::from_rgb(49, 54, 64);
-const TAB_ACTIVE: egui::Color32 = egui::Color32::from_rgb(49, 54, 64);
-const TAB_INACTIVE: egui::Color32 = egui::Color32::from_rgb(79, 83, 92);
+#[derive(Clone, Copy)]
+struct ThemeColors {
+    ui: egui::Color32,
+    sidebar: egui::Color32,
+    status: egui::Color32,
+    editor: egui::Color32,
+    gutter: egui::Color32,
+    tab_active: egui::Color32,
+    tab_inactive: egui::Color32,
+    foreground: egui::Color32,
+    is_light: bool,
+}
+
+impl ThemeColors {
+    fn new(light: bool) -> Self {
+        if light {
+            Self {
+                ui: egui::Color32::from_rgb(235, 236, 239),
+                sidebar: egui::Color32::from_rgb(244, 245, 247),
+                status: egui::Color32::from_rgb(225, 227, 231),
+                editor: egui::Color32::from_rgb(250, 250, 252),
+                gutter: egui::Color32::from_rgb(242, 243, 246),
+                tab_active: egui::Color32::from_rgb(250, 250, 252),
+                tab_inactive: egui::Color32::from_rgb(222, 224, 229),
+                foreground: egui::Color32::from_rgb(45, 48, 55),
+                is_light: true,
+            }
+        } else {
+            Self {
+                ui: egui::Color32::from_rgb(52, 51, 52),
+                sidebar: egui::Color32::from_rgb(34, 37, 41),
+                status: egui::Color32::from_rgb(45, 48, 54),
+                editor: egui::Color32::from_rgb(49, 54, 64),
+                gutter: egui::Color32::from_rgb(49, 54, 64),
+                tab_active: egui::Color32::from_rgb(49, 54, 64),
+                tab_inactive: egui::Color32::from_rgb(79, 83, 92),
+                foreground: egui::Color32::from_rgb(204, 205, 207),
+                is_light: false,
+            }
+        }
+    }
+}
 
 #[derive(Clone, Copy)]
 enum EditCommand {
@@ -24,33 +62,117 @@ enum EditCommand {
 
 type TreeIcon = String;
 
+#[derive(Clone, Copy)]
+enum LspNavigationKind {
+    Definition,
+    Declaration,
+    TypeDefinition,
+    Implementation,
+    References,
+}
+
+impl LspNavigationKind {
+    fn method(self) -> &'static str {
+        match self {
+            Self::Definition => "textDocument/definition",
+            Self::Declaration => "textDocument/declaration",
+            Self::TypeDefinition => "textDocument/typeDefinition",
+            Self::Implementation => "textDocument/implementation",
+            Self::References => "textDocument/references",
+        }
+    }
+}
+
+#[derive(Clone)]
+struct EditorLocation {
+    path: PathBuf,
+    character_offset: usize,
+}
+
+#[derive(Clone)]
+struct NavigationTarget {
+    path: PathBuf,
+    line: u32,
+    character: u32,
+}
+
+struct PendingNavigation {
+    kind: LspNavigationKind,
+    origin: EditorLocation,
+}
+
+struct PendingCompletion {
+    document_id: u64,
+    character_offset: usize,
+    text_snapshot: String,
+}
+
+#[derive(Clone)]
+struct CompletionCandidate {
+    label: String,
+    insert_text: String,
+    replace_range: Option<(usize, usize)>,
+}
+
 pub struct SublemonApp {
     documents: Vec<Document>,
     active_document: usize,
     sidebar_visible: bool,
     status_bar_visible: bool,
     word_wrap: bool,
+    markdown_preview: bool,
+    light_theme: bool,
     cursor_line: usize,
     cursor_column: usize,
+    cursor_offsets: HashMap<u64, usize>,
+    pending_navigations: HashMap<i64, PendingNavigation>,
+    navigation_history: Vec<EditorLocation>,
+    navigation_results: Vec<NavigationTarget>,
+    navigation_result_origin: Option<EditorLocation>,
+    pending_completions: HashMap<i64, PendingCompletion>,
+    pending_hovers: HashMap<i64, u64>,
+    completion_items: Vec<CompletionCandidate>,
+    completion_selection: usize,
+    completion_document_id: Option<u64>,
+    completion_cursor_offset: usize,
+    hover_content: Option<String>,
     path_dialog: Option<PathDialog>,
     path_input: String,
     message: Option<String>,
     close_confirmation: Option<usize>,
     pending_edit_command: Option<EditCommand>,
-    workspace_root: PathBuf,
+    workspace_roots: Vec<PathBuf>,
+    workspace_entries_cache: HashMap<PathBuf, Vec<PathBuf>>,
+    tree_cache_updated_at: Instant,
     expanded_folders: HashSet<PathBuf>,
     tree_icon_textures: HashMap<String, egui::TextureHandle>,
+    lsp: Option<LspClient>,
+    lsp_status: String,
+    lsp_command: String,
+    lsp_documents_opened: bool,
+    lsp_diagnostic_count: usize,
+    lsp_diagnostics: HashMap<String, Vec<String>>,
 }
 
 #[derive(Clone, Copy)]
 enum PathDialog {
-    Open,
     SaveAs,
+    ImportFolder,
+    StartLsp,
+    ImportSublimePackage,
 }
 
 impl Default for SublemonApp {
     fn default() -> Self {
         let workspace_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let (workspace_roots, lsp_command, settings_error) = load_project_settings(&workspace_root)
+            .unwrap_or_else(|error| {
+                (
+                    vec![workspace_root.clone()],
+                    String::new(),
+                    Some(format!("Could not read .sublemon.json: {error}")),
+                )
+            });
         let mut documents: Vec<Document> = ["README.md", "AGENTS.md"]
             .into_iter()
             .filter_map(|name| Document::open(&workspace_root.join(name)).ok())
@@ -58,23 +180,45 @@ impl Default for SublemonApp {
         if documents.is_empty() {
             documents.push(Document::untitled());
         }
-        let expanded_folders = HashSet::from([workspace_root.clone()]);
+        let expanded_folders = workspace_roots.iter().cloned().collect();
         Self {
             documents,
             active_document: 0,
             sidebar_visible: true,
             status_bar_visible: true,
             word_wrap: true,
+            markdown_preview: false,
+            light_theme: false,
             cursor_line: 1,
             cursor_column: 1,
+            cursor_offsets: HashMap::new(),
+            pending_navigations: HashMap::new(),
+            navigation_history: Vec::new(),
+            navigation_results: Vec::new(),
+            navigation_result_origin: None,
+            pending_completions: HashMap::new(),
+            pending_hovers: HashMap::new(),
+            completion_items: Vec::new(),
+            completion_selection: 0,
+            completion_document_id: None,
+            completion_cursor_offset: 0,
+            hover_content: None,
             path_dialog: None,
             path_input: String::new(),
-            message: None,
+            message: settings_error,
             close_confirmation: None,
             pending_edit_command: None,
-            workspace_root,
+            workspace_roots,
+            workspace_entries_cache: HashMap::new(),
+            tree_cache_updated_at: Instant::now(),
             expanded_folders,
             tree_icon_textures: HashMap::new(),
+            lsp: None,
+            lsp_status: "LSP stopped".to_owned(),
+            lsp_command,
+            lsp_documents_opened: false,
+            lsp_diagnostic_count: 0,
+            lsp_diagnostics: HashMap::new(),
         }
     }
 }
@@ -109,8 +253,8 @@ impl SublemonApp {
         texture
     }
 
-    fn show_tabs(&mut self, ui: &mut egui::Ui) {
-        egui::Frame::new().fill(TAB_INACTIVE).show(ui, |ui| {
+    fn show_tabs(&mut self, ui: &mut egui::Ui, colors: ThemeColors) {
+        egui::Frame::new().fill(colors.tab_inactive).show(ui, |ui| {
             ui.add_space(2.0);
             egui::ScrollArea::horizontal()
                 .id_salt("document_tabs")
@@ -126,7 +270,11 @@ impl SublemonApp {
                             let active = index == self.active_document;
                             let title = document.title(index + 1);
                             let frame = egui::Frame::new()
-                                .fill(if active { TAB_ACTIVE } else { TAB_INACTIVE })
+                                .fill(if active {
+                                    colors.tab_active
+                                } else {
+                                    colors.tab_inactive
+                                })
                                 .inner_margin(egui::Margin::symmetric(12, 5));
                             frame.show(ui, |ui| {
                                 ui.horizontal(|ui| {
@@ -169,7 +317,7 @@ impl SublemonApp {
         let mut open_file = false;
 
         let icon = if is_directory {
-            tree_folder_icon(&name, path == self.workspace_root)
+            tree_folder_icon(&name, self.workspace_roots.iter().any(|root| root == path))
         } else {
             tree_file_icon(path)
         };
@@ -210,14 +358,42 @@ impl SublemonApp {
         if open_file {
             self.open_path(path.to_path_buf());
         }
-        if is_directory && self.expanded_folders.contains(path) {
-            for child in self.workspace_entries(path) {
-                self.show_folder_row(ui, &child, depth + 1);
+    }
+
+    fn workspace_tree_rows(&mut self) -> Vec<(PathBuf, usize)> {
+        if self.tree_cache_updated_at.elapsed().as_secs() >= 2 {
+            self.workspace_entries_cache.clear();
+            self.tree_cache_updated_at = Instant::now();
+        }
+        let mut rows = Vec::new();
+        for root in self.workspace_roots.clone() {
+            rows.push((root.clone(), 0));
+            self.append_tree_children(&root, 1, &mut rows);
+        }
+        rows
+    }
+
+    fn append_tree_children(
+        &mut self,
+        folder: &Path,
+        depth: usize,
+        rows: &mut Vec<(PathBuf, usize)>,
+    ) {
+        if !self.expanded_folders.contains(folder) {
+            return;
+        }
+        for child in self.workspace_entries(folder) {
+            rows.push((child.clone(), depth));
+            if child.is_dir() && self.expanded_folders.contains(&child) {
+                self.append_tree_children(&child, depth + 1, rows);
             }
         }
     }
 
-    fn workspace_entries(&self, folder: &Path) -> Vec<PathBuf> {
+    fn workspace_entries(&mut self, folder: &Path) -> Vec<PathBuf> {
+        if let Some(entries) = self.workspace_entries_cache.get(folder) {
+            return entries.clone();
+        }
         let mut entries: Vec<PathBuf> = fs::read_dir(folder)
             .into_iter()
             .flatten()
@@ -241,6 +417,8 @@ impl SublemonApp {
                     .to_lowercase(),
             )
         });
+        self.workspace_entries_cache
+            .insert(folder.to_path_buf(), entries.clone());
         entries
     }
 
@@ -248,6 +426,10 @@ impl SublemonApp {
         if self.documents[index].is_dirty() {
             self.close_confirmation = Some(index);
             return;
+        }
+
+        if let (Some(lsp), Some(path)) = (&mut self.lsp, self.documents[index].path.as_deref()) {
+            let _ = lsp.did_close(path);
         }
 
         if self.documents.len() == 1 {
@@ -267,6 +449,7 @@ impl SublemonApp {
     fn open_path(&mut self, path: PathBuf) {
         match Document::open(&path) {
             Ok(document) => {
+                let mut was_new = false;
                 if let Some(existing) = self
                     .documents
                     .iter()
@@ -276,11 +459,498 @@ impl SublemonApp {
                 } else {
                     self.documents.push(document);
                     self.active_document = self.documents.len() - 1;
+                    was_new = true;
+                }
+                if was_new {
+                    self.notify_active_document_open();
                 }
                 self.message = None;
             }
             Err(error) => self.message = Some(format!("Could not open file: {error}")),
         }
+    }
+
+    fn open_folder(&mut self, path: PathBuf) {
+        match canonical_folder(&path) {
+            Ok(root) => {
+                let (roots, command, settings_error) =
+                    load_project_settings(&root).unwrap_or_else(|error| {
+                        (
+                            vec![root.clone()],
+                            String::new(),
+                            Some(format!("Could not read .sublemon.json: {error}")),
+                        )
+                    });
+                self.workspace_roots = roots;
+                self.lsp_command = command;
+                self.expanded_folders.clear();
+                self.expanded_folders
+                    .extend(self.workspace_roots.iter().cloned());
+                self.workspace_entries_cache.clear();
+                if let Some(lsp) = self.lsp.as_mut() {
+                    let roots: Vec<_> = self.workspace_roots.iter().map(PathBuf::as_path).collect();
+                    let _ = lsp.sync_workspace_folders(&roots);
+                }
+                self.message = settings_error;
+            }
+            Err(error) => self.message = Some(format!("Could not open folder: {error}")),
+        }
+    }
+
+    fn import_folder(&mut self, path: PathBuf) {
+        match canonical_folder(&path) {
+            Ok(root) if self.workspace_roots.contains(&root) => {
+                self.message = Some("That folder is already in the project.".to_owned());
+            }
+            Ok(root) => {
+                self.expanded_folders.insert(root.clone());
+                self.workspace_roots.push(root);
+                self.workspace_roots[1..].sort();
+                if let Some(lsp) = self.lsp.as_mut() {
+                    let roots: Vec<_> = self.workspace_roots.iter().map(PathBuf::as_path).collect();
+                    let _ = lsp.sync_workspace_folders(&roots);
+                }
+                self.message = save_project_settings(&self.workspace_roots, &self.lsp_command)
+                    .err()
+                    .map(|error| {
+                        format!("Folder added, but project settings were not saved: {error}")
+                    });
+            }
+            Err(error) => self.message = Some(format!("Could not add folder: {error}")),
+        }
+    }
+
+    fn import_sublime_package(&mut self, archive: PathBuf) {
+        let Some(project_root) = self.workspace_roots.first().cloned() else {
+            self.message = Some("Open a project folder before importing a package.".into());
+            return;
+        };
+        let packages_dir = project_root.join(".sublemon").join("packages");
+        match extract_package(&archive, &packages_dir) {
+            Ok(package_root) => {
+                self.workspace_roots.push(package_root.clone());
+                self.expanded_folders.insert(package_root.clone());
+                self.workspace_entries_cache.clear();
+                if let Some(lsp) = self.lsp.as_mut() {
+                    let roots: Vec<_> = self.workspace_roots.iter().map(PathBuf::as_path).collect();
+                    let _ = lsp.sync_workspace_folders(&roots);
+                }
+                self.message = save_project_settings(&self.workspace_roots, &self.lsp_command)
+                    .err()
+                    .map(|error| {
+                        format!("Package imported, but project settings were not saved: {error}")
+                    });
+                if self.message.is_none() {
+                    self.message = Some(format!(
+                        "Imported {} as package files. Package code is not executed.",
+                        package_root
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                    ));
+                }
+            }
+            Err(error) => self.message = Some(format!("Could not import package: {error}")),
+        }
+    }
+
+    fn notify_active_document_open(&mut self) {
+        let Some(lsp) = self.lsp.as_mut().filter(|lsp| lsp.is_ready()) else {
+            return;
+        };
+        if let Some(document) = self.documents.get(self.active_document) {
+            if let Some(path) = document.path.as_deref() {
+                if let Err(error) = lsp.did_open(path, &document.text) {
+                    self.message = Some(format!("Could not notify language server: {error}"));
+                }
+            }
+        }
+    }
+
+    fn request_lsp_navigation(&mut self, kind: LspNavigationKind) {
+        if matches!(kind, LspNavigationKind::References) {
+            self.navigation_results.clear();
+            self.navigation_result_origin = None;
+        }
+        let Some(document) = self.documents.get(self.active_document) else {
+            return;
+        };
+        let Some(path) = document.path.clone() else {
+            self.message =
+                Some("Save this file before asking the language server to navigate.".into());
+            return;
+        };
+        let text = document.text.clone();
+        let character_offset = self.cursor_offsets.get(&document.id).copied().unwrap_or(0);
+        let Some(lsp) = self.lsp.as_mut().filter(|lsp| lsp.is_ready()) else {
+            self.message = Some("Start a language server before using code navigation.".into());
+            return;
+        };
+        let extra = if matches!(kind, LspNavigationKind::References) {
+            serde_json::json!({ "context": { "includeDeclaration": true } })
+        } else {
+            serde_json::json!({})
+        };
+        match lsp.request_at(kind.method(), &path, &text, character_offset, extra) {
+            Ok(id) => {
+                self.pending_navigations.insert(
+                    id,
+                    PendingNavigation {
+                        kind,
+                        origin: EditorLocation {
+                            path,
+                            character_offset,
+                        },
+                    },
+                );
+                self.message = None;
+            }
+            Err(error) => self.message = Some(format!("Could not request navigation: {error}")),
+        }
+    }
+
+    fn request_completion(&mut self) {
+        self.completion_items.clear();
+        self.completion_document_id = None;
+        let Some(document) = self.documents.get(self.active_document) else {
+            return;
+        };
+        let Some(path) = document.path.clone() else {
+            self.message = Some("Save this file before requesting completions.".into());
+            return;
+        };
+        let document_id = document.id;
+        let text = document.text.clone();
+        let character_offset = self.cursor_offsets.get(&document_id).copied().unwrap_or(0);
+        let Some(lsp) = self.lsp.as_mut().filter(|lsp| lsp.is_ready()) else {
+            self.message = Some("Start a language server before requesting completions.".into());
+            return;
+        };
+        match lsp.request_at(
+            "textDocument/completion",
+            &path,
+            &text,
+            character_offset,
+            serde_json::json!({ "context": { "triggerKind": 1 } }),
+        ) {
+            Ok(id) => {
+                self.pending_completions.insert(
+                    id,
+                    PendingCompletion {
+                        document_id,
+                        character_offset,
+                        text_snapshot: text,
+                    },
+                );
+                self.message = None;
+            }
+            Err(error) => self.message = Some(format!("Could not request completions: {error}")),
+        }
+    }
+
+    fn request_hover(&mut self) {
+        self.hover_content = None;
+        let Some(document) = self.documents.get(self.active_document) else {
+            return;
+        };
+        let Some(path) = document.path.clone() else {
+            self.message = Some("Save this file before requesting hover information.".into());
+            return;
+        };
+        let document_id = document.id;
+        let text = document.text.clone();
+        let character_offset = self.cursor_offsets.get(&document.id).copied().unwrap_or(0);
+        let Some(lsp) = self.lsp.as_mut().filter(|lsp| lsp.is_ready()) else {
+            self.message =
+                Some("Start a language server before requesting hover information.".into());
+            return;
+        };
+        match lsp.request_at(
+            "textDocument/hover",
+            &path,
+            &text,
+            character_offset,
+            serde_json::json!({}),
+        ) {
+            Ok(id) => {
+                self.pending_hovers.insert(id, document_id);
+                self.message = None;
+            }
+            Err(error) => self.message = Some(format!("Could not request hover: {error}")),
+        }
+    }
+
+    fn apply_completion(&mut self, context: &egui::Context, index: usize) {
+        if self.completion_document_id != Some(self.documents[self.active_document].id) {
+            self.completion_items.clear();
+            return;
+        }
+        let Some(candidate) = self.completion_items.get(index).cloned() else {
+            return;
+        };
+        let document = &mut self.documents[self.active_document];
+        let offset = self
+            .completion_cursor_offset
+            .min(document.text.chars().count());
+        let (start, end) = candidate
+            .replace_range
+            .unwrap_or_else(|| (completion_prefix_start(&document.text, offset), offset));
+        let start = start.min(document.text.chars().count());
+        let end = end.min(document.text.chars().count()).max(start);
+        let start_byte = char_to_byte(&document.text, start);
+        let end_byte = char_to_byte(&document.text, end);
+        document
+            .text
+            .replace_range(start_byte..end_byte, &candidate.insert_text);
+        let new_offset = start + candidate.insert_text.chars().count();
+        let path = document.path.clone();
+        let document_id = document.id;
+        self.completion_items.clear();
+        self.completion_selection = 0;
+        self.completion_document_id = None;
+        self.set_editor_cursor(context, new_offset);
+        if let (Some(lsp), Some(path)) = (&mut self.lsp, path) {
+            if let Err(error) = lsp.did_change(&path, &self.documents[self.active_document].text) {
+                self.message = Some(format!(
+                    "Could not sync completion to language server: {error}"
+                ));
+            }
+        }
+        self.cursor_offsets.insert(document_id, new_offset);
+    }
+
+    fn resolve_navigation_response(
+        &mut self,
+        context: &egui::Context,
+        message: &serde_json::Value,
+    ) {
+        if message.get("method").is_some() {
+            return;
+        }
+        let Some(id) = message.get("id").and_then(serde_json::Value::as_i64) else {
+            return;
+        };
+        let Some(pending) = self.pending_navigations.remove(&id) else {
+            return;
+        };
+        if let Some(error) = message.get("error") {
+            self.message = Some(format!("Language server navigation failed: {error}"));
+            return;
+        }
+        let targets = locations_from_result(&message["result"]);
+        if targets.is_empty() {
+            self.message = Some("The language server found no navigation result.".into());
+            return;
+        }
+        if matches!(pending.kind, LspNavigationKind::References) {
+            self.navigation_results = targets;
+            self.navigation_result_origin = Some(pending.origin);
+        } else if let Some(target) = targets.into_iter().next() {
+            self.navigate_to_target(context, target, Some(pending.origin));
+        }
+    }
+
+    fn navigate_to_target(
+        &mut self,
+        context: &egui::Context,
+        mut target: NavigationTarget,
+        origin: Option<EditorLocation>,
+    ) {
+        target.path = fs::canonicalize(&target.path).unwrap_or(target.path);
+        self.open_path(target.path.clone());
+        if !self.documents[self.active_document]
+            .path
+            .as_ref()
+            .is_some_and(|path| path == &target.path)
+        {
+            return;
+        }
+        let text = self.documents[self.active_document].text.clone();
+        let character_offset = offset_from_position(&text, target.line, target.character);
+        if let Some(origin) = origin {
+            self.navigation_history.push(origin);
+        }
+        self.set_editor_cursor(context, character_offset);
+    }
+
+    fn navigate_back(&mut self, context: &egui::Context) {
+        let Some(location) = self.navigation_history.pop() else {
+            self.message = Some("There is no previous navigation location.".into());
+            return;
+        };
+        self.open_path(location.path.clone());
+        if self.documents[self.active_document]
+            .path
+            .as_ref()
+            .is_some_and(|path| path == &location.path)
+        {
+            self.set_editor_cursor(context, location.character_offset);
+        }
+    }
+
+    fn set_editor_cursor(&mut self, context: &egui::Context, character_offset: usize) {
+        let document = &self.documents[self.active_document];
+        let character_offset = character_offset.min(document.text.chars().count());
+        let id = egui::Id::new(("sublemon_editor", document.id));
+        let mut state = egui::TextEdit::load_state(context, id).unwrap_or_default();
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::one(
+                egui::text::CCursor::new(character_offset),
+            )));
+        state.store(context, id);
+        self.cursor_offsets.insert(document.id, character_offset);
+        let prefix: String = document.text.chars().take(character_offset).collect();
+        self.cursor_line = document_line_count(&prefix);
+        self.cursor_column = prefix
+            .rsplit('\n')
+            .next()
+            .map_or(1, |line| line.chars().count() + 1);
+    }
+
+    fn start_language_server(&mut self, command: &str) {
+        if self.lsp.is_some() {
+            self.stop_language_server();
+        }
+        let Some(root) = self.workspace_roots.first() else {
+            self.message = Some("Add a project folder before starting a language server.".into());
+            return;
+        };
+        self.lsp_command = command.trim().to_owned();
+        let settings_error = save_project_settings(&self.workspace_roots, &self.lsp_command).err();
+        match LspClient::start(command, root) {
+            Ok(client) => {
+                self.lsp = Some(client);
+                self.lsp_status = "Starting language server…".into();
+                self.lsp_documents_opened = false;
+                self.lsp_diagnostic_count = 0;
+                self.lsp_diagnostics.clear();
+                self.message = settings_error.map(|error| {
+                    format!("Language server started, but project settings were not saved: {error}")
+                });
+            }
+            Err(error) => self.message = Some(format!("Could not start language server: {error}")),
+        }
+    }
+
+    fn poll_language_server(&mut self, context: &egui::Context) {
+        let (messages, ready) = match self.lsp.as_mut() {
+            Some(lsp) => (lsp.poll(), lsp.is_ready()),
+            None => return,
+        };
+        let mut exited = false;
+        for message in messages {
+            if message.get("method").is_none()
+                && message.get("id") == Some(&serde_json::json!(1))
+                && message.get("error").is_some()
+            {
+                self.message = Some(format!(
+                    "Language server initialization failed: {}",
+                    message["error"]
+                ));
+                exited = true;
+            }
+            match message.get("method").and_then(serde_json::Value::as_str) {
+                Some("textDocument/publishDiagnostics") => {
+                    let uri = message["params"]["uri"].as_str().unwrap_or("document");
+                    let diagnostics: Vec<_> = message["params"]["diagnostics"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(|diagnostic| {
+                            let severity = match diagnostic["severity"].as_u64() {
+                                Some(1) => "Error",
+                                Some(2) => "Warning",
+                                Some(3) => "Information",
+                                Some(4) => "Hint",
+                                _ => "Diagnostic",
+                            };
+                            format!(
+                                "{uri}: {severity}: {}",
+                                diagnostic["message"].as_str().unwrap_or_default()
+                            )
+                        })
+                        .collect();
+                    self.lsp_diagnostics.insert(uri.to_owned(), diagnostics);
+                    self.lsp_diagnostic_count = self.lsp_diagnostics.values().map(Vec::len).sum();
+                }
+                Some("sublemon/error") => {
+                    self.message = message["message"].as_str().map(str::to_owned);
+                }
+                Some("sublemon/exit") => exited = true,
+                _ => {}
+            }
+            if message.get("method").is_none()
+                && let Some(id) = message.get("id").and_then(serde_json::Value::as_i64)
+            {
+                if let Some(pending) = self.pending_completions.remove(&id) {
+                    let unchanged = self
+                        .documents
+                        .iter()
+                        .find(|document| document.id == pending.document_id)
+                        .is_some_and(|document| document.text == pending.text_snapshot);
+                    if unchanged {
+                        self.completion_items =
+                            completion_candidates(&message["result"], &pending.text_snapshot);
+                        self.completion_selection = 0;
+                        self.completion_document_id = Some(pending.document_id);
+                        self.completion_cursor_offset = pending.character_offset;
+                        if self.completion_items.is_empty() {
+                            self.completion_document_id = None;
+                        }
+                    }
+                }
+                if let Some(document_id) = self.pending_hovers.remove(&id) {
+                    if self
+                        .documents
+                        .get(self.active_document)
+                        .is_some_and(|document| document.id == document_id)
+                    {
+                        self.hover_content = hover_contents(&message["result"]);
+                    }
+                }
+            }
+            self.resolve_navigation_response(context, &message);
+        }
+        if ready {
+            self.lsp_status = format!("LSP · {} diagnostics", self.lsp_diagnostic_count);
+            if !self.lsp_documents_opened {
+                let documents: Vec<_> = self
+                    .documents
+                    .iter()
+                    .filter_map(|document| {
+                        document
+                            .path
+                            .as_ref()
+                            .map(|path| (path.clone(), document.text.clone()))
+                    })
+                    .collect();
+                if let Some(lsp) = self.lsp.as_mut() {
+                    let roots: Vec<_> = self.workspace_roots.iter().map(PathBuf::as_path).collect();
+                    let _ = lsp.sync_workspace_folders(&roots);
+                    for (path, text) in documents {
+                        let _ = lsp.did_open(&path, &text);
+                    }
+                }
+                self.lsp_documents_opened = true;
+            }
+        }
+        if exited {
+            if let Some(lsp) = self.lsp.take() {
+                lsp.stop();
+            }
+            self.lsp_status = "Language server exited".into();
+        }
+    }
+
+    fn stop_language_server(&mut self) {
+        if let Some(lsp) = self.lsp.take() {
+            lsp.stop();
+        }
+        self.lsp_status = "LSP stopped".into();
+        self.lsp_documents_opened = false;
+        self.lsp_diagnostic_count = 0;
+        self.lsp_diagnostics.clear();
     }
 
     fn save_active(&mut self) {
@@ -311,7 +981,68 @@ impl SublemonApp {
 
 impl eframe::App for SublemonApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        apply_dark_editor_style(ui.ctx());
+        self.poll_language_server(ui.ctx());
+        let (definition, references, back, completion) = ui.input_mut(|input| {
+            (
+                input.consume_key(egui::Modifiers::NONE, egui::Key::F12),
+                input.consume_key(egui::Modifiers::SHIFT, egui::Key::F12),
+                input.consume_key(egui::Modifiers::ALT, egui::Key::ArrowLeft),
+                input.consume_key(egui::Modifiers::CTRL, egui::Key::Space),
+            )
+        });
+        let toggle_markdown_preview = ui.input_mut(|input| {
+            let pressed = input.events.iter().any(|event| matches!(event,
+                egui::Event::Key { key: egui::Key::V, pressed: true, modifiers, .. }
+                    if modifiers.shift && (modifiers.ctrl || modifiers.command) && !modifiers.alt
+            ));
+            if pressed {
+                input.events.retain(|event| !matches!(event,
+                    egui::Event::Key { key: egui::Key::V, pressed: true, modifiers, .. }
+                        if modifiers.shift && (modifiers.ctrl || modifiers.command) && !modifiers.alt
+                ));
+            }
+            pressed
+        });
+        if toggle_markdown_preview {
+            self.markdown_preview = !self.markdown_preview;
+        }
+        if definition {
+            self.request_lsp_navigation(LspNavigationKind::Definition);
+        } else if references {
+            self.request_lsp_navigation(LspNavigationKind::References);
+        }
+        if back {
+            self.navigate_back(ui.ctx());
+        }
+        if completion {
+            self.request_completion();
+        }
+        if !self.completion_items.is_empty() {
+            let (up, down, accept, dismiss) = ui.input_mut(|input| {
+                (
+                    input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp),
+                    input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown),
+                    input.consume_key(egui::Modifiers::NONE, egui::Key::Enter),
+                    input.consume_key(egui::Modifiers::NONE, egui::Key::Escape),
+                )
+            });
+            if up {
+                self.completion_selection = self.completion_selection.saturating_sub(1);
+            }
+            if down {
+                self.completion_selection =
+                    (self.completion_selection + 1).min(self.completion_items.len() - 1);
+            }
+            if accept {
+                self.apply_completion(ui.ctx(), self.completion_selection);
+            }
+            if dismiss {
+                self.completion_items.clear();
+                self.completion_document_id = None;
+            }
+        }
+        let colors = ThemeColors::new(self.light_theme);
+        apply_editor_style(ui.ctx(), colors);
 
         egui::Panel::top("main_menu").show(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
@@ -321,12 +1052,25 @@ impl eframe::App for SublemonApp {
                         self.new_document();
                         ui.close();
                     }
-                    if ui.button("Open File…").clicked() {
+                    ui.menu_button("Open", |ui| {
+                        if ui.button("File…").clicked() {
+                            if let Some(path) = rfd::FileDialog::new().pick_file() {
+                                self.open_path(path);
+                            }
+                            ui.close();
+                        }
+                        if ui.button("Folder…").clicked() {
+                            if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                                self.open_folder(path);
+                            }
+                            ui.close();
+                        }
+                    });
+                    if ui.button("Import Sublime Package…").clicked() {
                         self.path_input.clear();
-                        self.path_dialog = Some(PathDialog::Open);
+                        self.path_dialog = Some(PathDialog::ImportSublimePackage);
                         ui.close();
                     }
-                    ui.add_enabled(false, egui::Button::new("Open Folder…"));
                     ui.separator();
                     if ui.button("Save").clicked() {
                         if self.documents[self.active_document].path.is_some() {
@@ -368,6 +1112,10 @@ impl eframe::App for SublemonApp {
                         self.pending_edit_command = Some(EditCommand::Redo);
                         ui.close();
                     }
+                    if ui.button("Complete             Ctrl+Space").clicked() {
+                        self.request_completion();
+                        ui.close();
+                    }
                     ui.separator();
                     ui.add_enabled(false, egui::Button::new("Cut"));
                     ui.add_enabled(false, egui::Button::new("Copy"));
@@ -394,12 +1142,46 @@ impl eframe::App for SublemonApp {
                     ui.checkbox(&mut self.status_bar_visible, "Show Status Bar");
                     ui.separator();
                     ui.checkbox(&mut self.word_wrap, "Word Wrap");
+                    ui.checkbox(&mut self.light_theme, "Light Theme");
+                    ui.checkbox(
+                        &mut self.markdown_preview,
+                        "Markdown Preview    Ctrl+Shift+V",
+                    );
                 });
 
                 ui.menu_button("Goto", |ui| {
                     ui.add_enabled(false, egui::Button::new("Goto Anything…"));
                     ui.add_enabled(false, egui::Button::new("Goto Line…"));
                     ui.add_enabled(false, egui::Button::new("Goto Symbol…"));
+                    ui.separator();
+                    if ui.button("Go to Definition    F12").clicked() {
+                        self.request_lsp_navigation(LspNavigationKind::Definition);
+                        ui.close();
+                    }
+                    if ui.button("Go to Declaration").clicked() {
+                        self.request_lsp_navigation(LspNavigationKind::Declaration);
+                        ui.close();
+                    }
+                    if ui.button("Go to Type Definition").clicked() {
+                        self.request_lsp_navigation(LspNavigationKind::TypeDefinition);
+                        ui.close();
+                    }
+                    if ui.button("Go to Implementation").clicked() {
+                        self.request_lsp_navigation(LspNavigationKind::Implementation);
+                        ui.close();
+                    }
+                    if ui.button("Find References    Shift+F12").clicked() {
+                        self.request_lsp_navigation(LspNavigationKind::References);
+                        ui.close();
+                    }
+                    if ui.button("Show Hover").clicked() {
+                        self.request_hover();
+                        ui.close();
+                    }
+                    if ui.button("Back    Alt+Left").clicked() {
+                        self.navigate_back(ui.ctx());
+                        ui.close();
+                    }
                 });
 
                 ui.menu_button("Tools", |ui| {
@@ -408,8 +1190,20 @@ impl eframe::App for SublemonApp {
                 });
 
                 ui.menu_button("Project", |ui| {
-                    ui.add_enabled(false, egui::Button::new("Open Project…"));
-                    ui.add_enabled(false, egui::Button::new("Add Folder to Project…"));
+                    if ui.button("Add Folder to Project…").clicked() {
+                        self.path_input.clear();
+                        self.path_dialog = Some(PathDialog::ImportFolder);
+                        ui.close();
+                    }
+                    if ui.button("Start Language Server…").clicked() {
+                        self.path_input.clone_from(&self.lsp_command);
+                        self.path_dialog = Some(PathDialog::StartLsp);
+                        ui.close();
+                    }
+                    if self.lsp.is_some() && ui.button("Stop Language Server").clicked() {
+                        self.stop_language_server();
+                        ui.close();
+                    }
                 });
 
                 ui.menu_button("Preferences", |ui| {
@@ -427,7 +1221,7 @@ impl eframe::App for SublemonApp {
 
         if self.status_bar_visible {
             egui::Panel::bottom("status_bar")
-                .frame(egui::Frame::new().fill(STATUS))
+                .frame(egui::Frame::new().fill(colors.status))
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.label("◧");
@@ -449,6 +1243,18 @@ impl eframe::App for SublemonApp {
                                     }
                                 });
                             ui.label(language);
+                            ui.label(&self.lsp_status).on_hover_text(
+                                if self.lsp_diagnostics.is_empty() {
+                                    self.lsp_status.clone()
+                                } else {
+                                    self.lsp_diagnostics
+                                        .values()
+                                        .flatten()
+                                        .cloned()
+                                        .collect::<Vec<_>>()
+                                        .join("\n")
+                                },
+                            );
                             ui.label("UTF-8").on_hover_text(format!(
                                 "UTF-8 · {}",
                                 self.active_document().line_ending.label()
@@ -465,12 +1271,12 @@ impl eframe::App for SublemonApp {
         if self.sidebar_visible {
             let sidebar_default_size = (ui.ctx().content_rect().width() * 0.43).clamp(250.0, 550.0);
             egui::Panel::left("sidebar_layout_v2")
-                .frame(egui::Frame::new().fill(SIDEBAR))
+                .frame(egui::Frame::new().fill(colors.sidebar))
                 .resizable(true)
                 .default_size(sidebar_default_size)
                 .min_size(0.0)
                 .show(ui, |ui| {
-                    ui.painter().rect_filled(ui.max_rect(), 0.0, SIDEBAR);
+                    ui.painter().rect_filled(ui.max_rect(), 0.0, colors.sidebar);
                     ui.add_space(12.0);
                     ui.horizontal(|ui| {
                         ui.strong("FOLDERS");
@@ -479,203 +1285,306 @@ impl eframe::App for SublemonApp {
                         });
                     });
                     ui.add_space(10.0);
-                    self.show_folder_row(ui, &self.workspace_root.clone(), 0);
+                    let rows = self.workspace_tree_rows();
+                    egui::ScrollArea::vertical()
+                        .id_salt("project_file_tree")
+                        .auto_shrink([false, false])
+                        .show_rows(ui, 22.0, rows.len(), |ui, visible_rows| {
+                            ui.spacing_mut().item_spacing.y = 0.0;
+                            for index in visible_rows {
+                                let (path, depth) = &rows[index];
+                                self.show_folder_row(ui, path, *depth);
+                            }
+                        });
                 });
         }
 
+        let mut lsp_change = None;
         egui::CentralPanel::default_margins()
-            .frame(egui::Frame::new().fill(EDITOR).inner_margin(0))
+            .frame(egui::Frame::new().fill(colors.editor).inner_margin(0))
             .show(ui, |ui| {
-                self.show_tabs(ui);
+                self.show_tabs(ui, colors);
                 let gutter_width = 56.0;
                 let content_width = ui.available_width();
-                let content_height = ui.available_height();
                 let editor_width =
                     (content_width - gutter_width - ui.spacing().item_spacing.x).max(1.0);
                 let chars_per_visual_line =
                     ((editor_width - 16.0) / (14.0 * 0.60)).floor().max(1.0) as usize;
-                let text_for_gutter = self.active_document().text.clone();
-                ui.horizontal_top(|ui| {
-                    ui.allocate_ui_with_layout(
-                        egui::vec2(gutter_width, content_height),
-                        egui::Layout::top_down(egui::Align::Min),
-                        |ui| {
-                            ui.painter().rect_filled(ui.max_rect(), 0.0, GUTTER);
-                            ui.add_space(8.0);
-                            egui::ScrollArea::vertical()
-                                .id_salt("line_number_scroll")
-                                .auto_shrink([false, false])
-                                .show(ui, |ui| {
-                                    for (index, line_text) in
-                                        text_for_gutter.split('\n').enumerate()
-                                    {
-                                        let line = index + 1;
-                                        let line_height = 19.0;
-                                        if line == self.cursor_line {
-                                            ui.painter().rect_filled(
-                                                egui::Rect::from_min_size(
-                                                    ui.cursor().min,
-                                                    egui::vec2(ui.available_width(), line_height),
-                                                ),
-                                                0.0,
-                                                egui::Color32::from_rgb(70, 80, 94),
-                                            );
-                                        }
-                                        ui.with_layout(
-                                            egui::Layout::right_to_left(egui::Align::Min),
-                                            |ui| {
-                                                ui.add_sized(
-                                                    [42.0, line_height],
-                                                    egui::Label::new(
-                                                        egui::RichText::new(line.to_string())
-                                                            .monospace()
-                                                            .size(12.0)
-                                                            .color(egui::Color32::from_rgb(
-                                                                118, 133, 153,
-                                                            )),
-                                                    ),
-                                                );
-                                            },
-                                        );
-                                        let wrapped_rows = if self.word_wrap {
-                                            line_text
-                                                .chars()
-                                                .count()
-                                                .max(1)
-                                                .div_ceil(chars_per_visual_line)
-                                        } else {
-                                            1
-                                        };
-                                        for _ in 1..wrapped_rows {
-                                            ui.add_space(line_height);
-                                        }
-                                    }
-                                });
-                        },
-                    );
-                    ui.allocate_ui_with_layout(
-                        egui::vec2(editor_width, content_height),
-                        egui::Layout::top_down(egui::Align::Min),
-                        |ui| {
-                            let document_index = self.active_document;
-                            let document = &mut self.documents[document_index];
-                            let editor_id = egui::Id::new(("sublemon_editor", document.id));
-                            if egui::TextEdit::load_state(ui.ctx(), editor_id).is_none() {
-                                let mut state = egui::TextEdit::load_state(ui.ctx(), editor_id)
-                                    .unwrap_or_default();
-                                let mut caret = 0;
-                                for (line_index, line) in
-                                    document.text.split('\n').take(9).enumerate()
-                                {
-                                    caret += line.chars().count();
-                                    if line_index < 8 {
-                                        caret += 1;
-                                    }
-                                }
-                                state
-                                    .cursor
-                                    .set_char_range(Some(egui::text::CCursorRange::one(
-                                        egui::text::CCursor::new(
-                                            caret.min(document.text.chars().count()),
-                                        ),
-                                    )));
-                                state.store(ui.ctx(), editor_id);
-                            }
-                            if prepare_enter_indentation(ui.ctx(), editor_id, &mut document.text) {
-                                if let Some(mut state) =
-                                    egui::TextEdit::load_state(ui.ctx(), editor_id)
-                                {
-                                    let end = document.text.chars().count();
-                                    state.cursor.set_char_range(Some(
-                                        egui::text::CCursorRange::one(egui::text::CCursor::new(
-                                            end,
-                                        )),
-                                    ));
-                                    state.store(ui.ctx(), editor_id);
-                                }
-                            }
-                            let is_markdown = document
-                                .path
-                                .as_ref()
-                                .and_then(|path| path.extension())
-                                .is_some_and(|extension| extension.eq_ignore_ascii_case("md"));
-                            let mut layouter =
-                                |ui: &egui::Ui, buffer: &dyn egui::TextBuffer, wrap_width: f32| {
-                                    let mut job = if is_markdown {
-                                        markdown_layout(buffer.as_str(), wrap_width)
+                // Keep only line lengths for gutter sizing instead of cloning the full
+                // document on every UI frame, which was costly for large files.
+                let line_char_counts: Vec<usize> = self
+                    .active_document()
+                    .text
+                    .lines()
+                    .map(|line| line.chars().count())
+                    .collect();
+                let preview_lines: Vec<_> = if self.markdown_preview {
+                    self.active_document()
+                        .text
+                        .lines()
+                        .map(|line| (line.is_empty(), markdown_preview_text(line)))
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                let visual_rows = line_char_counts
+                    .iter()
+                    .map(|character_count| {
+                        if self.word_wrap {
+                            (*character_count).max(1).div_ceil(chars_per_visual_line)
+                        } else {
+                            1
+                        }
+                    })
+                    .sum::<usize>();
+                // TextEdit itself does not scroll its contents. Put the gutter and editor
+                // inside one shared viewport and give the row its full document height, so
+                // wheel/trackpad scrolling moves both columns together.
+                let content_height = (visual_rows as f32 * 19.0 + 16.0).max(ui.available_height());
+                egui::ScrollArea::vertical()
+                    .id_salt("editor_text_viewport")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        if self.markdown_preview {
+                            egui::Frame::new().fill(colors.editor).show(ui, |ui| {
+                                ui.set_min_height(content_height);
+                                ui.set_min_width(editor_width + gutter_width);
+                                ui.add_space(18.0);
+                                for (is_empty, line) in &preview_lines {
+                                    if *is_empty {
+                                        ui.add_space(7.0);
                                     } else {
-                                        egui::text::LayoutJob::simple(
-                                            buffer.as_str().to_owned(),
-                                            egui::FontId::monospace(14.0),
-                                            egui::Color32::from_rgb(204, 205, 207),
-                                            wrap_width,
-                                        )
-                                    };
-                                    job.wrap.max_width = wrap_width;
-                                    ui.fonts_mut(|fonts| fonts.layout_job(job))
-                                };
-                            let editor = egui::TextEdit::multiline(&mut document.text)
-                                .id(editor_id)
-                                .font(egui::TextStyle::Monospace)
-                                .desired_width(if self.word_wrap {
-                                    ui.available_width()
-                                } else {
-                                    f32::INFINITY
-                                })
-                                .desired_rows(40)
-                                .frame(egui::Frame::NONE)
-                                .margin(egui::Margin::symmetric(8, 8))
-                                .code_editor()
-                                .layouter(&mut layouter)
-                                .interactive(!document.read_only);
-                            let output = editor.show(ui);
-                            let mut cursor_range = output.cursor_range;
-                            if let Some(command) = self.pending_edit_command.take() {
-                                let current_range = cursor_range.unwrap_or_else(|| {
-                                    egui::text::CCursorRange::one(egui::text::CCursor::new(
-                                        document.text.chars().count(),
-                                    ))
-                                });
-                                let current = (current_range, document.text.clone());
-                                let mut undoer = output.state.undoer();
-                                let replacement = match command {
-                                    EditCommand::Undo => undoer.undo(&current).cloned(),
-                                    EditCommand::Redo => undoer.redo(&current).cloned(),
-                                    EditCommand::SelectAll => Some((
-                                        egui::text::CCursorRange::two(
-                                            egui::text::CCursor::new(0),
-                                            egui::text::CCursor::new(document.text.chars().count()),
-                                        ),
-                                        document.text.clone(),
-                                    )),
-                                };
-                                if let Some((range, text)) = replacement {
-                                    document.text = text;
-                                    cursor_range = Some(range);
-                                    let mut state = output.state;
-                                    state.cursor.set_char_range(Some(range));
-                                    state.store(ui.ctx(), output.response.id);
+                                        ui.label(line.clone());
+                                    }
                                 }
-                            }
-                            if let Some(cursor_range) = cursor_range {
-                                let cursor_index: usize = cursor_range.primary.index.into();
-                                let prefix: String =
-                                    document.text.chars().take(cursor_index).collect();
-                                self.cursor_line = document_line_count(&prefix);
-                                self.cursor_column = prefix
-                                    .rsplit('\n')
-                                    .next()
-                                    .map_or(1, |line| line.chars().count() + 1);
-                            }
-                        },
-                    );
-                });
+                            });
+                        } else {
+                            ui.horizontal_top(|ui| {
+                                ui.allocate_ui_with_layout(
+                                    egui::vec2(gutter_width, content_height),
+                                    egui::Layout::top_down(egui::Align::Min),
+                                    |ui| {
+                                        ui.painter().rect_filled(ui.max_rect(), 0.0, colors.gutter);
+                                        ui.add_space(8.0);
+                                        {
+                                            for (index, character_count) in
+                                                line_char_counts.iter().enumerate()
+                                            {
+                                                let line = index + 1;
+                                                let line_height = 19.0;
+                                                if line == self.cursor_line {
+                                                    ui.painter().rect_filled(
+                                                        egui::Rect::from_min_size(
+                                                            ui.cursor().min,
+                                                            egui::vec2(
+                                                                ui.available_width(),
+                                                                line_height,
+                                                            ),
+                                                        ),
+                                                        0.0,
+                                                        if colors.is_light {
+                                                            egui::Color32::from_rgb(222, 229, 240)
+                                                        } else {
+                                                            egui::Color32::from_rgb(70, 80, 94)
+                                                        },
+                                                    );
+                                                }
+                                                ui.with_layout(
+                                                    egui::Layout::right_to_left(egui::Align::Min),
+                                                    |ui| {
+                                                        ui.add_sized(
+                                                            [42.0, line_height],
+                                                            egui::Label::new(
+                                                                egui::RichText::new(
+                                                                    line.to_string(),
+                                                                )
+                                                                .monospace()
+                                                                .size(12.0)
+                                                                .color(if colors.is_light {
+                                                                    egui::Color32::from_rgb(
+                                                                        105, 115, 130,
+                                                                    )
+                                                                } else {
+                                                                    egui::Color32::from_rgb(
+                                                                        118, 133, 153,
+                                                                    )
+                                                                }),
+                                                            ),
+                                                        );
+                                                    },
+                                                );
+                                                let wrapped_rows = if self.word_wrap {
+                                                    (*character_count)
+                                                        .max(1)
+                                                        .div_ceil(chars_per_visual_line)
+                                                } else {
+                                                    1
+                                                };
+                                                for _ in 1..wrapped_rows {
+                                                    ui.add_space(line_height);
+                                                }
+                                            }
+                                        }
+                                    },
+                                );
+                                ui.allocate_ui_with_layout(
+                                    egui::vec2(editor_width, content_height),
+                                    egui::Layout::top_down(egui::Align::Min),
+                                    |ui| {
+                                        let document_index = self.active_document;
+                                        let document = &mut self.documents[document_index];
+                                        let editor_id =
+                                            egui::Id::new(("sublemon_editor", document.id));
+                                        if egui::TextEdit::load_state(ui.ctx(), editor_id).is_none()
+                                        {
+                                            let mut state =
+                                                egui::TextEdit::load_state(ui.ctx(), editor_id)
+                                                    .unwrap_or_default();
+                                            let mut caret = 0;
+                                            for (line_index, line) in
+                                                document.text.split('\n').take(9).enumerate()
+                                            {
+                                                caret += line.chars().count();
+                                                if line_index < 8 {
+                                                    caret += 1;
+                                                }
+                                            }
+                                            state.cursor.set_char_range(Some(
+                                                egui::text::CCursorRange::one(
+                                                    egui::text::CCursor::new(
+                                                        caret.min(document.text.chars().count()),
+                                                    ),
+                                                ),
+                                            ));
+                                            state.store(ui.ctx(), editor_id);
+                                        }
+                                        prepare_auto_pairs(ui.ctx(), editor_id, &mut document.text);
+                                        if prepare_enter_indentation(
+                                            ui.ctx(),
+                                            editor_id,
+                                            &mut document.text,
+                                        ) {
+                                            if let Some(mut state) =
+                                                egui::TextEdit::load_state(ui.ctx(), editor_id)
+                                            {
+                                                let end = document.text.chars().count();
+                                                state.cursor.set_char_range(Some(
+                                                    egui::text::CCursorRange::one(
+                                                        egui::text::CCursor::new(end),
+                                                    ),
+                                                ));
+                                                state.store(ui.ctx(), editor_id);
+                                            }
+                                        }
+                                        let syntax_path = document.path.clone();
+                                        let mut layouter =
+                                        |ui: &egui::Ui,
+                                         buffer: &dyn egui::TextBuffer,
+                                         wrap_width: f32| {
+                                            let mut job = crate::syntax::layout(
+                                                buffer.as_str(),
+                                                syntax_path.as_deref(),
+                                                wrap_width,
+                                                colors.is_light,
+                                            )
+                                            .unwrap_or_else(|| {
+                                                egui::text::LayoutJob::simple(
+                                                    buffer.as_str().to_owned(),
+                                                    egui::FontId::monospace(14.0),
+                                                    colors.foreground,
+                                                    wrap_width,
+                                                )
+                                            });
+                                            job.wrap.max_width = wrap_width;
+                                            ui.fonts_mut(|fonts| fonts.layout_job(job))
+                                        };
+                                        let editor = egui::TextEdit::multiline(&mut document.text)
+                                            .id(editor_id)
+                                            .font(egui::TextStyle::Monospace)
+                                            .desired_width(if self.word_wrap {
+                                                ui.available_width()
+                                            } else {
+                                                f32::INFINITY
+                                            })
+                                            .desired_rows(40)
+                                            .frame(egui::Frame::NONE)
+                                            .margin(egui::Margin::symmetric(8, 8))
+                                            .code_editor()
+                                            .layouter(&mut layouter)
+                                            .interactive(!document.read_only);
+                                        let output = editor.show(ui);
+                                        if output.response.changed() {
+                                            if let Some(path) = document.path.clone() {
+                                                lsp_change = Some((path, document.text.clone()));
+                                            }
+                                        }
+                                        let mut cursor_range = output.cursor_range;
+                                        if let Some(command) = self.pending_edit_command.take() {
+                                            let current_range = cursor_range.unwrap_or_else(|| {
+                                                egui::text::CCursorRange::one(
+                                                    egui::text::CCursor::new(
+                                                        document.text.chars().count(),
+                                                    ),
+                                                )
+                                            });
+                                            let current = (current_range, document.text.clone());
+                                            let mut undoer = output.state.undoer();
+                                            let replacement = match command {
+                                                EditCommand::Undo => undoer.undo(&current).cloned(),
+                                                EditCommand::Redo => undoer.redo(&current).cloned(),
+                                                EditCommand::SelectAll => Some((
+                                                    egui::text::CCursorRange::two(
+                                                        egui::text::CCursor::new(0),
+                                                        egui::text::CCursor::new(
+                                                            document.text.chars().count(),
+                                                        ),
+                                                    ),
+                                                    document.text.clone(),
+                                                )),
+                                            };
+                                            if let Some((range, text)) = replacement {
+                                                document.text = text;
+                                                cursor_range = Some(range);
+                                                let mut state = output.state;
+                                                state.cursor.set_char_range(Some(range));
+                                                state.store(ui.ctx(), output.response.id);
+                                            }
+                                        }
+                                        if let Some(cursor_range) = cursor_range {
+                                            let cursor_index: usize =
+                                                cursor_range.primary.index.into();
+                                            self.cursor_offsets.insert(document.id, cursor_index);
+                                            let prefix: String =
+                                                document.text.chars().take(cursor_index).collect();
+                                            self.cursor_line = document_line_count(&prefix);
+                                            self.cursor_column = prefix
+                                                .rsplit('\n')
+                                                .next()
+                                                .map_or(1, |line| line.chars().count() + 1);
+                                        }
+                                    },
+                                );
+                            });
+                        }
+                    });
             });
+
+        if let Some((path, text)) = lsp_change {
+            if let Some(lsp) = self.lsp.as_mut() {
+                if let Err(error) = lsp.did_change(&path, &text) {
+                    self.message = Some(format!(
+                        "Could not sync document to language server: {error}"
+                    ));
+                }
+            }
+        }
 
         if let Some(dialog) = self.path_dialog {
             let title = match dialog {
-                PathDialog::Open => "Open File",
                 PathDialog::SaveAs => "Save As",
+                PathDialog::ImportFolder => "Add Folder to Project",
+                PathDialog::StartLsp => "Start Language Server",
+                PathDialog::ImportSublimePackage => "Import Sublime Package",
             };
             let mut open = true;
             let mut submit = false;
@@ -685,7 +1594,14 @@ impl eframe::App for SublemonApp {
                 .resizable(false)
                 .open(&mut open)
                 .show(ui.ctx(), |ui| {
-                    ui.label("Enter a file path:");
+                    ui.label(match dialog {
+                        PathDialog::SaveAs => "Enter a file path:",
+                        PathDialog::ImportSublimePackage => {
+                            "Enter a .sublime-package archive path:"
+                        }
+                        PathDialog::ImportFolder => "Enter a folder path:",
+                        PathDialog::StartLsp => "Enter a language server command and arguments:",
+                    });
                     let response = ui
                         .add(egui::TextEdit::singleline(&mut self.path_input).desired_width(360.0));
                     if response.lost_focus()
@@ -706,8 +1622,13 @@ impl eframe::App for SublemonApp {
                 let path = PathBuf::from(self.path_input.trim());
                 if !path.as_os_str().is_empty() {
                     match dialog {
-                        PathDialog::Open => self.open_path(path),
                         PathDialog::SaveAs => self.save_active_as(path),
+                        PathDialog::ImportFolder => self.import_folder(path),
+                        PathDialog::ImportSublimePackage => self.import_sublime_package(path),
+                        PathDialog::StartLsp => {
+                            let command = self.path_input.clone();
+                            self.start_language_server(command.trim());
+                        }
                     }
                 }
                 open = false;
@@ -717,6 +1638,103 @@ impl eframe::App for SublemonApp {
             }
             if !open {
                 self.path_dialog = None;
+            }
+        }
+
+        if !self.navigation_results.is_empty() {
+            let results = self.navigation_results.clone();
+            let mut open = true;
+            let mut selected = None;
+            egui::Window::new("References")
+                .collapsible(false)
+                .resizable(true)
+                .open(&mut open)
+                .show(ui.ctx(), |ui| {
+                    ui.label(format!("{} results", results.len()));
+                    egui::ScrollArea::vertical()
+                        .max_height(360.0)
+                        .show(ui, |ui| {
+                            for (index, target) in results.iter().enumerate() {
+                                let filename = target.path.file_name().map_or_else(
+                                    || target.path.display().to_string(),
+                                    |name| name.to_string_lossy().into_owned(),
+                                );
+                                if ui
+                                    .selectable_label(
+                                        false,
+                                        format!(
+                                            "{filename}:{}  {}",
+                                            target.line + 1,
+                                            target.path.display()
+                                        ),
+                                    )
+                                    .clicked()
+                                {
+                                    selected = Some(index);
+                                }
+                            }
+                        });
+                });
+            if let Some(index) = selected {
+                let target = self.navigation_results[index].clone();
+                let origin = self.navigation_result_origin.take();
+                self.navigation_results.clear();
+                self.navigate_to_target(ui.ctx(), target, origin);
+            } else if !open {
+                self.navigation_results.clear();
+                self.navigation_result_origin = None;
+            }
+        }
+
+        if !self.completion_items.is_empty() {
+            let items = self.completion_items.clone();
+            let mut selected = None;
+            egui::Window::new("Completions")
+                .collapsible(false)
+                .resizable(false)
+                .default_width(300.0)
+                .show(ui.ctx(), |ui| {
+                    ui.label("Choose a language server completion:");
+                    egui::ScrollArea::vertical()
+                        .max_height(280.0)
+                        .show(ui, |ui| {
+                            for (index, candidate) in items.iter().enumerate() {
+                                if ui
+                                    .selectable_label(
+                                        index == self.completion_selection,
+                                        &candidate.label,
+                                    )
+                                    .clicked()
+                                {
+                                    selected = Some(index);
+                                }
+                            }
+                        });
+                    if ui.button("Dismiss").clicked() {
+                        selected = Some(usize::MAX);
+                    }
+                });
+            if let Some(index) = selected {
+                if index != usize::MAX {
+                    self.apply_completion(ui.ctx(), index);
+                } else {
+                    self.completion_items.clear();
+                    self.completion_document_id = None;
+                }
+            }
+        }
+
+        if let Some(hover) = self.hover_content.clone() {
+            let mut open = true;
+            egui::Window::new("Language Server Hover")
+                .collapsible(false)
+                .resizable(true)
+                .open(&mut open)
+                .show(ui.ctx(), |ui| {
+                    ui.label(egui::RichText::new(hover).monospace());
+                });
+            if !open {
+                self.hover_content = None;
             }
         }
 
@@ -845,6 +1863,113 @@ fn prepare_enter_indentation(
     true
 }
 
+fn prepare_auto_pairs(context: &egui::Context, editor_id: egui::Id, text: &mut String) -> bool {
+    if !context.memory(|memory| memory.has_focus(editor_id)) {
+        return false;
+    }
+    let Some(mut state) = egui::TextEdit::load_state(context, editor_id) else {
+        return false;
+    };
+    let Some(range) = state.cursor.char_range() else {
+        return false;
+    };
+    let selected = range.as_sorted_char_range();
+    let start_char: usize = selected.start.into();
+    let end_char: usize = selected.end.into();
+    let start_byte = char_to_byte(text, start_char);
+    let end_byte = char_to_byte(text, end_char);
+    let next_char = text[end_byte..].chars().next();
+    let event = context.input(|input| {
+        input.events.iter().find_map(|event| match event {
+            egui::Event::Text(value) if value.chars().count() == 1 => {
+                value.chars().next().map(|ch| (ch, value.clone()))
+            }
+            _ => None,
+        })
+    });
+    let Some((character, event_text)) = event else {
+        return false;
+    };
+    let pair = match character {
+        '(' => Some(')'),
+        '[' => Some(']'),
+        '{' => Some('}'),
+        '"' => Some('"'),
+        '\'' => Some('\''),
+        '`' => Some('`'),
+        _ => None,
+    };
+    if let Some(close) = pair {
+        let selection = &text[start_byte..end_byte];
+        let replacement = format!("{character}{selection}{close}");
+        let caret_start = start_char + 1;
+        let caret_end = caret_start + selection.chars().count();
+        text.replace_range(start_byte..end_byte, &replacement);
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::two(
+                egui::text::CCursor::new(caret_start),
+                egui::text::CCursor::new(caret_end),
+            )));
+    } else if matches!(character, ')' | ']' | '}' | '"' | '\'' | '`')
+        && next_char == Some(character)
+    {
+        let caret = start_char + 1;
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::one(
+                egui::text::CCursor::new(caret),
+            )));
+    } else {
+        return false;
+    }
+    state.store(context, editor_id);
+    context.input_mut(|input| {
+        input
+            .events
+            .retain(|event| !matches!(event, egui::Event::Text(value) if value == &event_text));
+    });
+    true
+}
+
+fn markdown_preview_text(line: &str) -> egui::RichText {
+    let trimmed = line.trim_start();
+    if let Some(heading) = trimmed.strip_prefix("###### ") {
+        return egui::RichText::new(heading).size(16.0).strong();
+    }
+    if let Some(heading) = trimmed.strip_prefix("##### ") {
+        return egui::RichText::new(heading).size(18.0).strong();
+    }
+    if let Some(heading) = trimmed.strip_prefix("#### ") {
+        return egui::RichText::new(heading).size(20.0).strong();
+    }
+    if let Some(heading) = trimmed.strip_prefix("### ") {
+        return egui::RichText::new(heading).size(22.0).strong();
+    }
+    if let Some(heading) = trimmed.strip_prefix("## ") {
+        return egui::RichText::new(heading).size(25.0).strong();
+    }
+    if let Some(heading) = trimmed.strip_prefix("# ") {
+        return egui::RichText::new(heading).size(29.0).strong();
+    }
+    if let Some(item) = trimmed
+        .strip_prefix("- ")
+        .or_else(|| trimmed.strip_prefix("* "))
+    {
+        return egui::RichText::new(format!("• {item}"));
+    }
+    if let Some(quote) = trimmed.strip_prefix("> ") {
+        return egui::RichText::new(format!("│  {quote}"))
+            .color(egui::Color32::from_rgb(160, 175, 195));
+    }
+    if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+        return egui::RichText::new(trimmed)
+            .monospace()
+            .color(egui::Color32::from_rgb(150, 172, 202));
+    }
+    egui::RichText::new(line.to_owned())
+}
+
 fn char_to_byte(text: &str, character_index: usize) -> usize {
     text.char_indices()
         .nth(character_index)
@@ -890,6 +2015,196 @@ fn tree_folder_icon(name: &str, is_root: bool) -> TreeIcon {
         .get(&name.to_ascii_lowercase())
         .cloned()
         .unwrap_or_else(|| "folder".to_owned())
+}
+
+fn canonical_folder(path: &Path) -> std::io::Result<PathBuf> {
+    let root = fs::canonicalize(path)?;
+    if !root.is_dir() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "the selected path is not a folder",
+        ));
+    }
+    Ok(root)
+}
+
+fn load_project_settings(
+    primary_root: &Path,
+) -> std::io::Result<(Vec<PathBuf>, String, Option<String>)> {
+    let primary = fs::canonicalize(primary_root).unwrap_or_else(|_| primary_root.to_path_buf());
+    let settings_path = primary.join(".sublemon.json");
+    let source = match fs::read_to_string(&settings_path) {
+        Ok(source) => source,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((vec![primary], String::new(), None));
+        }
+        Err(error) => return Err(error),
+    };
+    let settings: serde_json::Value = serde_json::from_str(&source)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    let mut roots = vec![primary.clone()];
+    if let Some(configured_roots) = settings["workspace_folders"].as_array() {
+        for configured in configured_roots
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+        {
+            let configured = PathBuf::from(configured);
+            let configured = if configured.is_absolute() {
+                configured
+            } else {
+                primary.join(configured)
+            };
+            if let Ok(root) = canonical_folder(&configured)
+                && !roots.contains(&root)
+            {
+                roots.push(root);
+            }
+        }
+    }
+    let command = settings["language_server_command"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    Ok((roots, command, None))
+}
+
+fn save_project_settings(roots: &[PathBuf], command: &str) -> std::io::Result<()> {
+    let Some(primary) = roots.first() else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "there is no primary project folder",
+        ));
+    };
+    let path = primary.join(".sublemon.json");
+    let mut settings = if path.exists() {
+        let source = fs::read_to_string(&path)?;
+        serde_json::from_str::<serde_json::Value>(&source)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?
+    } else {
+        serde_json::json!({})
+    };
+    let Some(object) = settings.as_object_mut() else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            ".sublemon.json must contain a JSON object",
+        ));
+    };
+    object.insert("version".into(), serde_json::json!(1));
+    object.insert(
+        "workspace_folders".into(),
+        serde_json::json!(
+            roots
+                .iter()
+                .map(|root| root.to_string_lossy())
+                .collect::<Vec<_>>()
+        ),
+    );
+    object.insert("language_server_command".into(), serde_json::json!(command));
+    fs::write(
+        path,
+        serde_json::to_vec_pretty(&settings).map_err(std::io::Error::other)?,
+    )
+}
+
+fn locations_from_result(result: &serde_json::Value) -> Vec<NavigationTarget> {
+    let values: Vec<&serde_json::Value> = match result {
+        serde_json::Value::Array(values) => values.iter().collect(),
+        serde_json::Value::Object(_) => vec![result],
+        _ => Vec::new(),
+    };
+    values
+        .into_iter()
+        .filter_map(|value| {
+            let uri = value
+                .get("targetUri")
+                .or_else(|| value.get("uri"))?
+                .as_str()?;
+            let range = value
+                .get("targetSelectionRange")
+                .or_else(|| value.get("range"))
+                .or_else(|| value.get("targetRange"))?;
+            let start = &range["start"];
+            Some(NavigationTarget {
+                path: uri_to_path(uri)?,
+                line: start["line"].as_u64()? as u32,
+                character: start["character"].as_u64()? as u32,
+            })
+        })
+        .collect()
+}
+
+fn completion_candidates(result: &serde_json::Value, text: &str) -> Vec<CompletionCandidate> {
+    let items = result
+        .as_array()
+        .or_else(|| result.get("items").and_then(serde_json::Value::as_array));
+    items
+        .into_iter()
+        .flatten()
+        .filter_map(|item| {
+            let label = item.get("label")?.as_str()?;
+            let edit = item.get("textEdit");
+            let range = edit
+                .and_then(|edit| edit.get("range").or_else(|| edit.get("replace")))
+                .and_then(|range| {
+                    let start = &range["start"];
+                    let end = &range["end"];
+                    Some((
+                        offset_from_position(
+                            text,
+                            start["line"].as_u64()? as u32,
+                            start["character"].as_u64()? as u32,
+                        ),
+                        offset_from_position(
+                            text,
+                            end["line"].as_u64()? as u32,
+                            end["character"].as_u64()? as u32,
+                        ),
+                    ))
+                });
+            let insert_text = edit
+                .and_then(|edit| edit.get("newText"))
+                .and_then(serde_json::Value::as_str)
+                .or_else(|| item.get("insertText").and_then(serde_json::Value::as_str))
+                .unwrap_or(label)
+                .to_owned();
+            Some(CompletionCandidate {
+                label: label.to_owned(),
+                insert_text,
+                replace_range: range,
+            })
+        })
+        .collect()
+}
+
+fn hover_contents(result: &serde_json::Value) -> Option<String> {
+    fn extract(value: &serde_json::Value, output: &mut Vec<String>) {
+        match value {
+            serde_json::Value::String(text) => output.push(text.clone()),
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    extract(item, output);
+                }
+            }
+            serde_json::Value::Object(object) => {
+                if let Some(text) = object.get("value").and_then(serde_json::Value::as_str) {
+                    output.push(text.to_owned());
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut output = Vec::new();
+    extract(result.get("contents")?, &mut output);
+    let text = output.join("\n\n");
+    (!text.trim().is_empty()).then_some(text)
+}
+
+fn completion_prefix_start(text: &str, cursor_offset: usize) -> usize {
+    let prefix: Vec<char> = text.chars().take(cursor_offset).collect();
+    prefix
+        .iter()
+        .rposition(|ch| !(ch.is_alphanumeric() || matches!(ch, '_' | '$')))
+        .map_or(0, |index| index + 1)
 }
 
 struct TreeIconAssociations {
@@ -974,92 +2289,52 @@ fn paint_disclosure(painter: &egui::Painter, rect: egui::Rect, expanded: bool) {
     ));
 }
 
-fn markdown_layout(text: &str, wrap_width: f32) -> egui::text::LayoutJob {
-    let mut job = egui::text::LayoutJob::default();
-    job.wrap.max_width = wrap_width;
-    let body_color = egui::Color32::from_rgb(205, 206, 210);
-    let heading_color = egui::Color32::from_rgb(179, 199, 226);
-    let marker_color = egui::Color32::from_rgb(230, 116, 72);
-    let bold_color = egui::Color32::from_rgb(190, 198, 224);
-
-    for line in text.split_inclusive('\n') {
-        let trimmed = line.trim_start();
-        let hashes = trimmed
-            .chars()
-            .take_while(|character| *character == '#')
-            .count();
-        if hashes > 0 {
-            let leading = line.len() - trimmed.len();
-            let marker_end = (leading
-                + hashes
-                + trimmed[hashes..]
-                    .chars()
-                    .take_while(|character| *character == ' ')
-                    .count())
-            .min(line.len());
-            job.append(
-                &line[..marker_end],
-                0.0,
-                egui::TextFormat::simple(egui::FontId::monospace(14.0), marker_color),
-            );
-            append_markdown_body(&mut job, &line[marker_end..], heading_color, bold_color);
-        } else {
-            append_markdown_body(&mut job, line, body_color, bold_color);
-        }
-    }
-    job
-}
-
-fn append_markdown_body(
-    job: &mut egui::text::LayoutJob,
-    text: &str,
-    body_color: egui::Color32,
-    bold_color: egui::Color32,
-) {
-    let normal = egui::TextFormat::simple(egui::FontId::monospace(14.0), body_color);
-    let bold = egui::TextFormat::simple(egui::FontId::monospace(14.0), bold_color);
-    let marker = egui::TextFormat::simple(
-        egui::FontId::monospace(14.0),
-        egui::Color32::from_rgb(205, 135, 173),
-    );
-    let mut remaining = text;
-    while let Some(start) = remaining.find("**") {
-        job.append(&remaining[..start], 0.0, normal.clone());
-        let after_start = &remaining[start + 2..];
-        let Some(end) = after_start.find("**") else {
-            job.append(&remaining[start..], 0.0, normal);
-            return;
-        };
-        job.append("**", 0.0, marker.clone());
-        job.append(&after_start[..end], 0.0, bold.clone());
-        job.append("**", 0.0, marker.clone());
-        remaining = &after_start[end + 2..];
-    }
-    job.append(remaining, 0.0, normal);
-}
-
-fn apply_dark_editor_style(context: &egui::Context) {
-    let mut visuals = egui::Visuals::dark();
-    visuals.panel_fill = UI;
-    visuals.window_fill = UI;
-    visuals.extreme_bg_color = EDITOR;
-    visuals.code_bg_color = EDITOR;
-    visuals.faint_bg_color = egui::Color32::from_rgb(57, 62, 73);
-    visuals.selection.bg_fill = egui::Color32::from_rgb(70, 80, 94);
-    visuals.selection.stroke.color = egui::Color32::from_rgb(173, 186, 207);
-    visuals.widgets.noninteractive.bg_fill = UI;
-    visuals.widgets.inactive.bg_fill = UI;
-    visuals.widgets.inactive.fg_stroke.color = egui::Color32::from_rgb(205, 205, 198);
-    visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(66, 67, 60);
-    visuals.widgets.hovered.fg_stroke.color = egui::Color32::WHITE;
-    visuals.widgets.active.bg_fill = egui::Color32::from_rgb(81, 81, 72);
-    visuals.widgets.active.fg_stroke.color = egui::Color32::WHITE;
+fn apply_editor_style(context: &egui::Context, colors: ThemeColors) {
+    let mut visuals = if colors.is_light {
+        egui::Visuals::light()
+    } else {
+        egui::Visuals::dark()
+    };
+    visuals.panel_fill = colors.ui;
+    visuals.window_fill = colors.ui;
+    visuals.extreme_bg_color = colors.editor;
+    visuals.code_bg_color = colors.editor;
+    visuals.faint_bg_color = if colors.is_light {
+        egui::Color32::from_rgb(232, 234, 238)
+    } else {
+        egui::Color32::from_rgb(57, 62, 73)
+    };
+    visuals.selection.bg_fill = if colors.is_light {
+        egui::Color32::from_rgb(194, 211, 239)
+    } else {
+        egui::Color32::from_rgb(70, 80, 94)
+    };
+    visuals.selection.stroke.color = if colors.is_light {
+        egui::Color32::from_rgb(72, 102, 150)
+    } else {
+        egui::Color32::from_rgb(173, 186, 207)
+    };
+    visuals.widgets.noninteractive.bg_fill = colors.ui;
+    visuals.widgets.inactive.bg_fill = colors.ui;
+    visuals.widgets.inactive.fg_stroke.color = colors.foreground;
+    visuals.widgets.hovered.bg_fill = if colors.is_light {
+        egui::Color32::from_rgb(220, 225, 233)
+    } else {
+        egui::Color32::from_rgb(66, 67, 60)
+    };
+    visuals.widgets.hovered.fg_stroke.color = colors.foreground;
+    visuals.widgets.active.bg_fill = if colors.is_light {
+        egui::Color32::from_rgb(205, 214, 229)
+    } else {
+        egui::Color32::from_rgb(81, 81, 72)
+    };
+    visuals.widgets.active.fg_stroke.color = colors.foreground;
     context.set_visuals(visuals);
 
     context.style_mut_of(context.theme(), |style| {
         style.spacing.item_spacing = egui::vec2(4.0, 3.0);
         style.spacing.button_padding = egui::vec2(5.0, 3.0);
-        style.visuals.dark_mode = true;
+        style.visuals.dark_mode = !colors.is_light;
     });
 }
 

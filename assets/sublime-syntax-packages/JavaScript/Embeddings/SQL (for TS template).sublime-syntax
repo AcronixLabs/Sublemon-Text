@@ -1,0 +1,48 @@
+%YAML 1.2
+---
+# http://www.sublimetext.com/docs/syntax.html
+# highlight tagged template strings
+scope: source.sql.ts-template
+version: 2
+hidden: true
+
+extends: Packages/SQL/SQL.sublime-syntax
+
+contexts:
+
+  prototype:
+    - meta_prepend: true
+    - include: literal-string-template-end-ahead
+    - include: scope:source.ts.plain#text-interpolations
+
+  comment-prototype:
+    - meta_prepend: true
+    - include: literal-string-template-end-ahead
+    - include: scope:source.ts.plain#text-interpolations
+
+  identifier-prototype:
+    - meta_prepend: true
+    - include: literal-string-template-end-ahead
+    - include: scope:source.ts.plain#text-interpolations
+
+  string-prototype:
+    - meta_prepend: true
+    - include: literal-string-template-end-ahead
+    - include: scope:source.ts.plain#string-interpolations
+
+  backtick-quoted-identifier-part:
+    - match: \\\`
+      scope: punctuation.definition.identifier.begin.sql
+      set: inside-backtick-quoted-identifier-part
+
+  inside-backtick-quoted-identifier-part:
+    # note: may contain foreign variable interpolation
+    - meta_include_prototype: false
+    - match: \\\`
+      scope: punctuation.definition.identifier.end.sql
+      pop: 1
+    - include: identifier-prototype
+
+  literal-string-template-end-ahead:
+    - match: (?=`)
+      pop: 1

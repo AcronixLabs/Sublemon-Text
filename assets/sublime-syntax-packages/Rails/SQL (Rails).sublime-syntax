@@ -1,0 +1,29 @@
+%YAML 1.2
+---
+name: SQL (Rails)
+scope: source.sql.rails
+version: 2
+
+extends: Packages/SQL/SQL.sublime-syntax
+
+file_extensions:
+  - sql.erb
+  - erbsql
+
+contexts:
+
+  prototype:
+    - meta_prepend: true
+    - include: HTML (Rails).sublime-syntax#rails-embedded
+
+  comment-prototype:
+    - meta_prepend: true
+    - include: HTML (Rails).sublime-syntax#rails-embedded
+
+  identifier-prototype:
+    - meta_prepend: true
+    - include: HTML (Rails).sublime-syntax#rails-embedded
+
+  string-prototype:
+    - meta_prepend: true
+    - include: HTML (Rails).sublime-syntax#rails-interpolations

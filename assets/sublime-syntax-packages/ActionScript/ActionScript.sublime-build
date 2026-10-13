@@ -1,0 +1,14 @@
+//  Packages/ActionScript/ActionScript.sublime-build
+
+{
+    "cmd": [
+        "mxmlc",
+        "${file}",
+        "-library-path+=${project_path}/libs",
+        "-output", "${project_path}/bin/${project_base_name}.swf",
+        "-debug=false",
+        "-static-link-runtime-shared-libraries=true"
+    ],
+    "selector": "source.actionscript",
+    "file_regex": "^(.+?)\\(([0-9]+)\\): col: (([0-9]+))(.*)$"
+}
