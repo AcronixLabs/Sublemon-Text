@@ -8,6 +8,13 @@ const GUTTER: egui::Color32 = egui::Color32::from_rgb(39, 40, 34);
 const TAB_ACTIVE: egui::Color32 = egui::Color32::from_rgb(57, 58, 51);
 const ACCENT: egui::Color32 = egui::Color32::from_rgb(230, 190, 90);
 
+#[derive(Clone, Copy)]
+enum EditCommand {
+    Undo,
+    Redo,
+    SelectAll,
+}
+
 pub struct SublemonApp {
     documents: Vec<Document>,
     active_document: usize,
@@ -21,6 +28,7 @@ pub struct SublemonApp {
     path_input: String,
     message: Option<String>,
     close_confirmation: Option<usize>,
+    pending_edit_command: Option<EditCommand>,
 }
 
 #[derive(Clone, Copy)]
@@ -44,6 +52,7 @@ impl Default for SublemonApp {
             path_input: String::new(),
             message: None,
             close_confirmation: None,
+            pending_edit_command: None,
         }
     }
 }
@@ -174,8 +183,14 @@ impl eframe::App for SublemonApp {
                 });
 
                 ui.menu_button("Edit", |ui| {
-                    ui.add_enabled(false, egui::Button::new("Undo"));
-                    ui.add_enabled(false, egui::Button::new("Redo"));
+                    if ui.button("Undo                     Ctrl+Z").clicked() {
+                        self.pending_edit_command = Some(EditCommand::Undo);
+                        ui.close();
+                    }
+                    if ui.button("Redo                     Ctrl+Y").clicked() {
+                        self.pending_edit_command = Some(EditCommand::Redo);
+                        ui.close();
+                    }
                     ui.separator();
                     ui.add_enabled(false, egui::Button::new("Cut"));
                     ui.add_enabled(false, egui::Button::new("Copy"));
@@ -183,7 +198,10 @@ impl eframe::App for SublemonApp {
                 });
 
                 ui.menu_button("Selection", |ui| {
-                    ui.add_enabled(false, egui::Button::new("Select All"));
+                    if ui.button("Select All             Ctrl+A").clicked() {
+                        self.pending_edit_command = Some(EditCommand::SelectAll);
+                        ui.close();
+                    }
                     ui.add_enabled(false, egui::Button::new("Expand Selection to Line"));
                     ui.add_enabled(false, egui::Button::new("Add Next Occurrence"));
                 });
@@ -384,19 +402,63 @@ impl eframe::App for SublemonApp {
         egui::CentralPanel::default_margins()
             .frame(egui::Frame::new().fill(EDITOR).inner_margin(0))
             .show(ui, |ui| {
-                let document = &mut self.documents[self.active_document];
-                let mut editor = egui::TextEdit::multiline(&mut document.text)
+                let document_index = self.active_document;
+                let document = &mut self.documents[document_index];
+                let editor_id = egui::Id::new(("sublemon_editor", document.id));
+                if prepare_enter_indentation(ui.ctx(), editor_id, &mut document.text) {
+                    if let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), editor_id) {
+                        let end = document.text.chars().count();
+                        state
+                            .cursor
+                            .set_char_range(Some(egui::text::CCursorRange::one(
+                                egui::text::CCursor::new(end),
+                            )));
+                        state.store(ui.ctx(), editor_id);
+                    }
+                }
+                let editor = egui::TextEdit::multiline(&mut document.text)
+                    .id(editor_id)
                     .font(egui::TextStyle::Monospace)
-                    .desired_width(f32::INFINITY)
+                    .desired_width(if self.word_wrap {
+                        ui.available_width()
+                    } else {
+                        f32::INFINITY
+                    })
                     .desired_rows(40)
                     .frame(egui::Frame::NONE)
                     .margin(egui::Margin::symmetric(8, 8))
+                    .code_editor()
                     .interactive(!document.read_only);
-                if !self.word_wrap {
-                    editor = editor.code_editor();
-                }
                 let output = editor.show(ui);
-                if let Some(cursor_range) = output.cursor_range {
+                let mut cursor_range = output.cursor_range;
+                if let Some(command) = self.pending_edit_command.take() {
+                    let current_range = cursor_range.unwrap_or_else(|| {
+                        egui::text::CCursorRange::one(egui::text::CCursor::new(
+                            document.text.chars().count(),
+                        ))
+                    });
+                    let current = (current_range, document.text.clone());
+                    let mut undoer = output.state.undoer();
+                    let replacement = match command {
+                        EditCommand::Undo => undoer.undo(&current).cloned(),
+                        EditCommand::Redo => undoer.redo(&current).cloned(),
+                        EditCommand::SelectAll => Some((
+                            egui::text::CCursorRange::two(
+                                egui::text::CCursor::new(0),
+                                egui::text::CCursor::new(document.text.chars().count()),
+                            ),
+                            document.text.clone(),
+                        )),
+                    };
+                    if let Some((range, text)) = replacement {
+                        document.text = text;
+                        cursor_range = Some(range);
+                        let mut state = output.state;
+                        state.cursor.set_char_range(Some(range));
+                        state.store(ui.ctx(), output.response.id);
+                    }
+                }
+                if let Some(cursor_range) = cursor_range {
                     let cursor_index: usize = cursor_range.primary.index.into();
                     let prefix: String = document.text.chars().take(cursor_index).collect();
                     self.cursor_line = document_line_count(&prefix);
@@ -513,6 +575,77 @@ impl eframe::App for SublemonApp {
                 });
         }
     }
+}
+
+fn prepare_enter_indentation(
+    context: &egui::Context,
+    editor_id: egui::Id,
+    text: &mut String,
+) -> bool {
+    let has_focus = context.memory(|memory| memory.has_focus(editor_id));
+    if !has_focus {
+        return false;
+    }
+    let enter_pressed = context.input(|input| {
+        input.events.iter().any(|event| {
+            matches!(event,
+                egui::Event::Key {
+                    key: egui::Key::Enter,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } if !modifiers.ctrl && !modifiers.command && !modifiers.alt
+            )
+        })
+    });
+    if !enter_pressed {
+        return false;
+    }
+
+    let Some(mut state) = egui::TextEdit::load_state(context, editor_id) else {
+        return false;
+    };
+    let range = state.cursor.char_range().unwrap_or_else(|| {
+        egui::text::CCursorRange::one(egui::text::CCursor::new(text.chars().count()))
+    });
+    let selected = range.as_sorted_char_range();
+    let start_char: usize = selected.start.into();
+    let end_char: usize = selected.end.into();
+    let start_byte = char_to_byte(text, start_char);
+    let end_byte = char_to_byte(text, end_char);
+    let line_start = text[..start_byte].rfind('\n').map_or(0, |index| index + 1);
+    let line_prefix = &text[line_start..start_byte];
+    let mut indentation: String = line_prefix
+        .chars()
+        .take_while(|character| matches!(character, ' ' | '\t'))
+        .collect();
+    if line_prefix.trim_end().ends_with(['{', '[', '(']) {
+        indentation.push_str("    ");
+    }
+    let caret_char = text[..start_byte].chars().count() + 1 + indentation.chars().count();
+    text.replace_range(start_byte..end_byte, &format!("\n{indentation}"));
+    state
+        .cursor
+        .set_char_range(Some(egui::text::CCursorRange::one(
+            egui::text::CCursor::new(caret_char),
+        )));
+    state.store(context, editor_id);
+
+    context.input_mut(|input| {
+        input.events.retain(|event| {
+            !matches!(event,
+                egui::Event::Key { key: egui::Key::Enter, pressed: true, modifiers,
+                    .. } if !modifiers.ctrl && !modifiers.command && !modifiers.alt
+            )
+        });
+    });
+    true
+}
+
+fn char_to_byte(text: &str, character_index: usize) -> usize {
+    text.char_indices()
+        .nth(character_index)
+        .map_or(text.len(), |(byte_index, _)| byte_index)
 }
 
 fn apply_dark_editor_style(context: &egui::Context) {

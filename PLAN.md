@@ -101,7 +101,7 @@ This is a staged plan. Each milestone should leave a runnable, coherent applicat
 | --- | --- | --- |
 | 1. Native app foundation | Complete | Cargo project, eframe shell, in-memory scratch editing, and supplied icon are implemented; `cargo check --offline` passes and the initial GUI was launched. |
 | 2. Document/file model | In progress | Added a standalone UTF-8 document model, normalized editing with detected line-ending preservation, dirty tabs, path-based Open/Save/Save As/Revert, read-only protection, modified-file close prompts, and disk-change/overwrite guards. The current path prompt is a basic text-entry dialog; native file pickers, richer encoding support, and dedicated model tests remain. |
-| 3. Editing engine | Not started | |
+| 3. Editing engine | In progress | Prototyped around egui's multiline code editor: Unicode-safe character-indexed caret/selection, navigation, clipboard shortcuts, built-in keyboard undo/redo, Tab and Shift+Tab indentation, selectable undo/redo/select-all menu actions, configurable wrapping, and Enter auto-indentation. Editor state is keyed by stable document identity. Large-file profiling, IME/accessibility validation, structural editing commands, and a purpose-built engine decision remain. |
 | 4. Workspace UI | In progress | User requested close visual fidelity to Sublime Text's standard UI; implementing the menu, tabs, sidebar, gutter, minimap, status bar, and dark styling independently. |
 | 5. Search/navigation | Not started | |
 | 6. Language awareness | Not started | |

@@ -4,8 +4,11 @@ use std::{
     hash::{Hash, Hasher},
     io,
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
     time::SystemTime,
 };
+
+static NEXT_DOCUMENT_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LineEnding {
@@ -48,6 +51,7 @@ impl FileStamp {
 }
 
 pub struct Document {
+    pub id: u64,
     pub path: Option<PathBuf>,
     pub text: String,
     saved_text: String,
@@ -59,6 +63,7 @@ pub struct Document {
 impl Document {
     pub fn untitled() -> Self {
         Self {
+            id: NEXT_DOCUMENT_ID.fetch_add(1, Ordering::Relaxed),
             path: None,
             text: String::new(),
             saved_text: String::new(),
@@ -103,6 +108,7 @@ impl Document {
         let canonical = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         let baseline = Some(FileStamp::read(&canonical)?);
         Ok(Self {
+            id: NEXT_DOCUMENT_ID.fetch_add(1, Ordering::Relaxed),
             path: Some(canonical),
             saved_text: text.clone(),
             text,
