@@ -2,32 +2,22 @@
 
 ## Current objective
 
-Continue tuning Sublemon's clean-room UI to match `sublime_goal.png` as closely as practical. The user wants `HANDOFF.md` and `SESSION_LOG.md` updated at the end of each work step/session.
+Continue matching Sublemon's UI to `sublime_goal.png`. At the end of each work step, update this handoff and `SESSION_LOG.md` as requested by the user.
 
 ## Current implementation state
 
-- The fake text-based minimap is removed.
-- The sidebar remains draggable; its panel ID is `sidebar_layout_v2` to discard the old saved width. Its new initial width targets 43% of the viewport, clamped to 250–550 egui points.
-- The project sidebar minimum width is zero, so the drag handle can shrink it down to the divider.
-- The project tree has custom-painted folder, Markdown, Rust, image, configuration, and generic text-file icons; folder disclosure markers are painted chevrons.
-- The line-number gutter is laid out beside the editor under the tab strip. Tabs begin at the sidebar edge, as in the reference.
-- Markdown is wrapped and lightly highlighted.
-- `cargo fmt --check` and `cargo check --offline` passed after these changes.
+- `src/app.rs` embeds the Material Icon Theme v5.39.0 file and folder icons and resolves project-tree items using bundled filename, extension, and folder associations.
+- `assets/material-icon-theme/icons/` contains the upstream SVG set plus compatibility aliases for upstream icon names without standalone source SVGs. `png/` contains the 48×48 PNG textures embedded into the app by `build.rs`.
+- `assets/material-icon-theme/associations.tsv`, `LICENSE`, and `ATTRIBUTION.md` document the associations and MIT-licensed assets. `scripts/generate_icon_associations.py` can regenerate associations when given the upstream `src/core/icons` folder path.
+- The sidebar is draggable and can collapse to zero width. Tabs and gutter remain arranged below the top menu as described in the prior UI work.
 
-## Screenshot status
+## Verification and next actions
 
-- The user supplied a new 1920×1080 screenshot. It shows the corrected tab/gutter arrangement and a working editor.
-- In that screenshot the sidebar occupies about 34% of the width; the reference sidebar occupies about 43%. The code now targets 43% on first layout for the new panel ID. Capture again to verify.
-- The tree icons and zero-width sidebar change have compiled, but they have not yet been visually captured.
-- The reference file `sublime_goal.png` is 941×1038. Resize Sublemon to the reference's app-window dimensions before a meaningful pixel comparison.
-- A local app capture taken before the sidebar-ID reset showed an oversized sidebar. The attempted capture after the reset landed on a different workspace and is invalid. Do not treat `/tmp/sublemon-after-layout.png` as a verified post-reset app screenshot.
+- `cargo fmt` and `cargo check --offline` pass after the full icon integration.
+- Capture a new screenshot to inspect icon selection and visual weight in the project tree. No screenshot was captured in this step.
+- Compare at matching dimensions against `sublime_goal.png` using `scripts/ui_screenshot_test.py`; continue refining the remaining layout differences.
+- If associations are regenerated, ensure the compatibility alias assets remain in both `icons/` and `png/`, then run `cargo check --offline`.
 
-## Next actions
+## Clean-room and licensing
 
-1. Relaunch Sublemon and capture the actual app window to verify the tree icons and the zero-width sidebar drag behavior.
-2. Resize the app to 941×1038 to match `sublime_goal.png` and use `scripts/ui_screenshot_test.py` to quantify similarity. The goal previously discussed is at least 80% pixel similarity.
-3. Prioritize remaining visible layout mismatches (sidebar proportion, tab sizing/placement, gutter alignment, and line wrapping), then update both handoff files at the end of that work step.
-
-## Clean-room constraint
-
-Use only independently authored code/assets and public functional descriptions. Do not inspect or use the installed Sublime Text files, binaries, extracted resources, or disassembly.
+Sublemon source remains independently authored. No Sublime Text binaries, extracted resources, theme assets, or disassembly were used. Material Icon Theme is a separate open-source asset pack; its MIT license and attribution are included under `assets/material-icon-theme/`.

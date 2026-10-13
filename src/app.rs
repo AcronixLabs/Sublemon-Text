@@ -1,9 +1,10 @@
 use crate::document::Document;
 use eframe::egui;
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
+    sync::OnceLock,
 };
 
 const UI: egui::Color32 = egui::Color32::from_rgb(52, 51, 52);
@@ -21,15 +22,7 @@ enum EditCommand {
     SelectAll,
 }
 
-#[derive(Clone, Copy)]
-enum TreeIcon {
-    Folder { expanded: bool },
-    Markdown,
-    Rust,
-    Image,
-    Config,
-    Text,
-}
+type TreeIcon = String;
 
 pub struct SublemonApp {
     documents: Vec<Document>,
@@ -46,6 +39,7 @@ pub struct SublemonApp {
     pending_edit_command: Option<EditCommand>,
     workspace_root: PathBuf,
     expanded_folders: HashSet<PathBuf>,
+    tree_icon_textures: HashMap<String, egui::TextureHandle>,
 }
 
 #[derive(Clone, Copy)]
@@ -80,6 +74,7 @@ impl Default for SublemonApp {
             pending_edit_command: None,
             workspace_root,
             expanded_folders,
+            tree_icon_textures: HashMap::new(),
         }
     }
 }
@@ -92,6 +87,26 @@ impl SublemonApp {
 
     fn active_document(&self) -> &Document {
         &self.documents[self.active_document]
+    }
+
+    fn tree_icon_texture(&mut self, context: &egui::Context, icon: &str) -> egui::TextureHandle {
+        if let Some(texture) = self.tree_icon_textures.get(icon) {
+            return texture.clone();
+        }
+
+        let rgba = image::load_from_memory(material_icon_png(icon))
+            .expect("bundled Material Icon Theme PNG must be valid")
+            .into_rgba8();
+        let [width, height] = [rgba.width() as usize, rgba.height() as usize];
+        let color_image = egui::ColorImage::from_rgba_unmultiplied([width, height], rgba.as_raw());
+        let texture = context.load_texture(
+            format!("tree_icon_{icon}"),
+            color_image,
+            egui::TextureOptions::LINEAR,
+        );
+        self.tree_icon_textures
+            .insert(icon.to_owned(), texture.clone());
+        texture
     }
 
     fn show_tabs(&mut self, ui: &mut egui::Ui) {
@@ -153,6 +168,13 @@ impl SublemonApp {
         let mut toggle_folder = false;
         let mut open_file = false;
 
+        let icon = if is_directory {
+            tree_folder_icon(&name, path == self.workspace_root)
+        } else {
+            tree_file_icon(path)
+        };
+        let icon_texture = self.tree_icon_texture(ui.ctx(), &icon);
+
         ui.horizontal(|ui| {
             ui.add_space((depth * 14) as f32);
             if is_directory {
@@ -165,14 +187,9 @@ impl SublemonApp {
             } else {
                 ui.add_space(16.0);
             }
-            let icon = if is_directory {
-                TreeIcon::Folder { expanded }
-            } else {
-                tree_file_icon(path)
-            };
-            let (icon_rect, _) =
-                ui.allocate_exact_size(egui::vec2(18.0, 22.0), egui::Sense::hover());
-            paint_tree_icon(ui.painter(), icon_rect, icon);
+            ui.add(
+                egui::Image::from_texture(&icon_texture).fit_to_exact_size(egui::vec2(16.0, 16.0)),
+            );
             let selected = open_document == Some(self.active_document);
             if ui.selectable_label(selected, name.as_ref()).clicked() {
                 if is_directory {
@@ -835,23 +852,104 @@ fn char_to_byte(text: &str, character_index: usize) -> usize {
 }
 
 fn tree_file_icon(path: &Path) -> TreeIcon {
-    let name = path.file_name().unwrap_or_default().to_string_lossy();
-    if matches!(name.as_ref(), "Cargo.toml" | "Cargo.lock" | ".gitignore") {
-        return TreeIcon::Config;
+    let filename = path
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_ascii_lowercase();
+    let lower_path = path
+        .to_string_lossy()
+        .replace('\\', "/")
+        .to_ascii_lowercase();
+    let associations = tree_icon_associations();
+    if let Some(icon) = associations.files.get(&filename) {
+        return icon.clone();
+    }
+    if let Some((_, icon)) = associations
+        .files
+        .iter()
+        .find(|(pattern, _)| pattern.contains('/') && lower_path.ends_with(pattern.as_str()))
+    {
+        return icon.clone();
     }
 
-    match path
-        .extension()
-        .map(|extension| extension.to_string_lossy().to_ascii_lowercase())
-        .as_deref()
-    {
-        Some("md" | "markdown") => TreeIcon::Markdown,
-        Some("rs") => TreeIcon::Rust,
-        Some("png" | "jpg" | "jpeg" | "gif" | "svg" | "webp") => TreeIcon::Image,
-        Some("toml" | "json" | "yaml" | "yml" | "ini" | "conf") => TreeIcon::Config,
-        _ => TreeIcon::Text,
-    }
+    // Match the longest suffix first for compound extensions such as d.ts and schema.json.
+    associations
+        .extensions
+        .iter()
+        .find(|(pattern, _)| lower_path.ends_with(&format!(".{pattern}")))
+        .map_or_else(|| "document".to_owned(), |(_, icon)| icon.clone())
 }
+
+fn tree_folder_icon(name: &str, is_root: bool) -> TreeIcon {
+    if is_root {
+        return "folder-root".to_owned();
+    }
+    tree_icon_associations()
+        .folders
+        .get(&name.to_ascii_lowercase())
+        .cloned()
+        .unwrap_or_else(|| "folder".to_owned())
+}
+
+struct TreeIconAssociations {
+    files: HashMap<String, String>,
+    extensions: Vec<(String, String)>,
+    folders: HashMap<String, String>,
+}
+
+fn tree_icon_associations() -> &'static TreeIconAssociations {
+    static ASSOCIATIONS: OnceLock<TreeIconAssociations> = OnceLock::new();
+    ASSOCIATIONS.get_or_init(|| {
+        let mut associations = TreeIconAssociations {
+            files: HashMap::new(),
+            extensions: Vec::new(),
+            folders: HashMap::new(),
+        };
+        for line in include_str!("../assets/material-icon-theme/associations.tsv").lines() {
+            let mut fields = line.split('\t');
+            let Some(kind) = fields.next() else { continue };
+            let Some(pattern) = fields.next() else {
+                continue;
+            };
+            let Some(icon) = fields.next() else { continue };
+            match kind {
+                "name" => {
+                    associations
+                        .files
+                        .insert(pattern.to_owned(), icon.to_owned());
+                }
+                "ext" => associations
+                    .extensions
+                    .push((pattern.to_owned(), icon.to_owned())),
+                "folder" => {
+                    associations
+                        .folders
+                        .insert(pattern.to_owned(), icon.to_owned());
+                }
+                _ => {}
+            }
+        }
+        associations
+            .extensions
+            .sort_by_key(|(pattern, _)| std::cmp::Reverse(pattern.len()));
+        associations
+    })
+}
+
+fn material_icon_png(name: &str) -> &'static [u8] {
+    MATERIAL_ICON_PNGS
+        .iter()
+        .find_map(|(icon_name, bytes)| (*icon_name == name).then_some(*bytes))
+        .or_else(|| {
+            MATERIAL_ICON_PNGS
+                .iter()
+                .find_map(|(icon_name, bytes)| (*icon_name == "document").then_some(*bytes))
+        })
+        .expect("Material Icon Theme must include its document icon")
+}
+
+include!(concat!(env!("OUT_DIR"), "/material_icon_pngs.rs"));
 
 fn paint_disclosure(painter: &egui::Painter, rect: egui::Rect, expanded: bool) {
     let center = rect.center();
@@ -874,117 +972,6 @@ fn paint_disclosure(painter: &egui::Painter, rect: egui::Rect, expanded: bool) {
         color,
         egui::Stroke::NONE,
     ));
-}
-
-fn paint_tree_icon(painter: &egui::Painter, slot: egui::Rect, icon: TreeIcon) {
-    let left = slot.left() + 1.0;
-    let top = slot.top() + 3.0;
-    let center = slot.center();
-    let outline = egui::Color32::from_rgb(149, 164, 183);
-    let page_fill = egui::Color32::from_rgb(53, 59, 69);
-    match icon {
-        TreeIcon::Folder { expanded } => {
-            let fill = egui::Color32::from_rgb(121, 139, 160);
-            let points = vec![
-                egui::pos2(left, top + 4.0),
-                egui::pos2(left, top + 1.0),
-                egui::pos2(left + 6.5, top + 1.0),
-                egui::pos2(left + 8.5, top + 3.0),
-                egui::pos2(left + 15.0, top + 3.0),
-                egui::pos2(left + 15.0, top + 13.0),
-                egui::pos2(left, top + 13.0),
-            ];
-            painter.add(egui::Shape::convex_polygon(
-                points,
-                fill,
-                egui::Stroke::new(0.8, outline),
-            ));
-            if expanded {
-                painter.line_segment(
-                    [
-                        egui::pos2(left + 1.0, top + 7.0),
-                        egui::pos2(left + 14.0, top + 7.0),
-                    ],
-                    egui::Stroke::new(0.8, egui::Color32::from_rgb(188, 199, 213)),
-                );
-            }
-        }
-        file_kind => {
-            let accent = match file_kind {
-                TreeIcon::Markdown => egui::Color32::from_rgb(153, 177, 210),
-                TreeIcon::Rust => egui::Color32::from_rgb(218, 142, 105),
-                TreeIcon::Image => egui::Color32::from_rgb(131, 177, 145),
-                TreeIcon::Config => egui::Color32::from_rgb(195, 177, 128),
-                TreeIcon::Text | TreeIcon::Folder { .. } => outline,
-            };
-            let page = vec![
-                egui::pos2(left + 2.0, top),
-                egui::pos2(left + 10.0, top),
-                egui::pos2(left + 14.0, top + 4.0),
-                egui::pos2(left + 14.0, top + 15.0),
-                egui::pos2(left + 2.0, top + 15.0),
-            ];
-            painter.add(egui::Shape::convex_polygon(
-                page,
-                page_fill,
-                egui::Stroke::new(0.9, outline),
-            ));
-            painter.line_segment(
-                [
-                    egui::pos2(left + 10.0, top + 0.5),
-                    egui::pos2(left + 10.0, top + 4.0),
-                ],
-                egui::Stroke::new(0.8, outline),
-            );
-            painter.line_segment(
-                [
-                    egui::pos2(left + 10.0, top + 4.0),
-                    egui::pos2(left + 13.5, top + 4.0),
-                ],
-                egui::Stroke::new(0.8, outline),
-            );
-            match file_kind {
-                TreeIcon::Markdown | TreeIcon::Rust => {
-                    let label = if matches!(file_kind, TreeIcon::Markdown) {
-                        "M"
-                    } else {
-                        "R"
-                    };
-                    painter.text(
-                        egui::pos2(center.x, top + 10.0),
-                        egui::Align2::CENTER_CENTER,
-                        label,
-                        egui::FontId::proportional(8.0),
-                        accent,
-                    );
-                }
-                TreeIcon::Image => {
-                    painter.circle_filled(egui::pos2(left + 6.0, top + 7.0), 1.0, accent);
-                    painter.add(egui::Shape::convex_polygon(
-                        vec![
-                            egui::pos2(left + 3.0, top + 13.0),
-                            egui::pos2(left + 6.0, top + 9.0),
-                            egui::pos2(left + 8.0, top + 11.0),
-                            egui::pos2(left + 10.0, top + 8.0),
-                            egui::pos2(left + 13.0, top + 13.0),
-                        ],
-                        accent,
-                        egui::Stroke::NONE,
-                    ));
-                }
-                TreeIcon::Config | TreeIcon::Text => {
-                    for line in 0..3 {
-                        let y = top + 7.0 + line as f32 * 2.5;
-                        painter.line_segment(
-                            [egui::pos2(left + 4.0, y), egui::pos2(left + 11.0, y)],
-                            egui::Stroke::new(0.8, accent),
-                        );
-                    }
-                }
-                TreeIcon::Folder { .. } => unreachable!(),
-            }
-        }
-    }
 }
 
 fn markdown_layout(text: &str, wrap_width: f32) -> egui::text::LayoutJob {
