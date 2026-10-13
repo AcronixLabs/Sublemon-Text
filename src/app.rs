@@ -1,12 +1,18 @@
 use crate::document::Document;
 use eframe::egui;
-use std::path::PathBuf;
+use std::{
+    collections::HashSet,
+    fs,
+    path::{Path, PathBuf},
+};
 
-const UI: egui::Color32 = egui::Color32::from_rgb(45, 45, 45);
-const EDITOR: egui::Color32 = egui::Color32::from_rgb(39, 40, 34);
-const GUTTER: egui::Color32 = egui::Color32::from_rgb(39, 40, 34);
-const TAB_ACTIVE: egui::Color32 = egui::Color32::from_rgb(57, 58, 51);
-const ACCENT: egui::Color32 = egui::Color32::from_rgb(230, 190, 90);
+const UI: egui::Color32 = egui::Color32::from_rgb(52, 51, 52);
+const SIDEBAR: egui::Color32 = egui::Color32::from_rgb(34, 37, 41);
+const STATUS: egui::Color32 = egui::Color32::from_rgb(45, 48, 54);
+const EDITOR: egui::Color32 = egui::Color32::from_rgb(49, 54, 64);
+const GUTTER: egui::Color32 = egui::Color32::from_rgb(49, 54, 64);
+const TAB_ACTIVE: egui::Color32 = egui::Color32::from_rgb(49, 54, 64);
+const TAB_INACTIVE: egui::Color32 = egui::Color32::from_rgb(79, 83, 92);
 
 #[derive(Clone, Copy)]
 enum EditCommand {
@@ -15,11 +21,20 @@ enum EditCommand {
     SelectAll,
 }
 
+#[derive(Clone, Copy)]
+enum TreeIcon {
+    Folder { expanded: bool },
+    Markdown,
+    Rust,
+    Image,
+    Config,
+    Text,
+}
+
 pub struct SublemonApp {
     documents: Vec<Document>,
     active_document: usize,
     sidebar_visible: bool,
-    minimap_visible: bool,
     status_bar_visible: bool,
     word_wrap: bool,
     cursor_line: usize,
@@ -29,6 +44,8 @@ pub struct SublemonApp {
     message: Option<String>,
     close_confirmation: Option<usize>,
     pending_edit_command: Option<EditCommand>,
+    workspace_root: PathBuf,
+    expanded_folders: HashSet<PathBuf>,
 }
 
 #[derive(Clone, Copy)]
@@ -39,13 +56,21 @@ enum PathDialog {
 
 impl Default for SublemonApp {
     fn default() -> Self {
+        let workspace_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let mut documents: Vec<Document> = ["README.md", "AGENTS.md"]
+            .into_iter()
+            .filter_map(|name| Document::open(&workspace_root.join(name)).ok())
+            .collect();
+        if documents.is_empty() {
+            documents.push(Document::untitled());
+        }
+        let expanded_folders = HashSet::from([workspace_root.clone()]);
         Self {
-            documents: vec![Document::untitled()],
+            documents,
             active_document: 0,
             sidebar_visible: true,
-            minimap_visible: true,
             status_bar_visible: true,
-            word_wrap: false,
+            word_wrap: true,
             cursor_line: 1,
             cursor_column: 1,
             path_dialog: None,
@@ -53,6 +78,8 @@ impl Default for SublemonApp {
             message: None,
             close_confirmation: None,
             pending_edit_command: None,
+            workspace_root,
+            expanded_folders,
         }
     }
 }
@@ -65,6 +92,139 @@ impl SublemonApp {
 
     fn active_document(&self) -> &Document {
         &self.documents[self.active_document]
+    }
+
+    fn show_tabs(&mut self, ui: &mut egui::Ui) {
+        egui::Frame::new().fill(TAB_INACTIVE).show(ui, |ui| {
+            ui.add_space(2.0);
+            egui::ScrollArea::horizontal()
+                .id_salt("document_tabs")
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 6.0;
+                        let _ = ui.small_button("◀");
+                        let _ = ui.small_button("▶");
+                        ui.add_space(3.0);
+                        let mut close_index = None;
+                        for (index, document) in self.documents.iter().enumerate() {
+                            let active = index == self.active_document;
+                            let title = document.title(index + 1);
+                            let frame = egui::Frame::new()
+                                .fill(if active { TAB_ACTIVE } else { TAB_INACTIVE })
+                                .inner_margin(egui::Margin::symmetric(12, 5));
+                            frame.show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    let label = if document.is_dirty() {
+                                        format!("{title}  ●")
+                                    } else {
+                                        title
+                                    };
+                                    if ui.selectable_label(active, label).clicked() {
+                                        self.active_document = index;
+                                    }
+                                    if ui.small_button("×").clicked() {
+                                        close_index = Some(index);
+                                    }
+                                });
+                            });
+                        }
+                        if let Some(index) = close_index {
+                            self.close_document(index);
+                        }
+                        if ui.small_button("+").clicked() {
+                            self.new_document();
+                        }
+                        let _ = ui.small_button("▾");
+                    });
+                });
+        });
+        ui.separator();
+    }
+
+    fn show_folder_row(&mut self, ui: &mut egui::Ui, path: &Path, depth: usize) {
+        let is_directory = path.is_dir();
+        let expanded = self.expanded_folders.contains(path);
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        let open_document = self
+            .documents
+            .iter()
+            .position(|document| document.path.as_deref() == Some(path));
+        let mut toggle_folder = false;
+        let mut open_file = false;
+
+        ui.horizontal(|ui| {
+            ui.add_space((depth * 14) as f32);
+            if is_directory {
+                let (rect, response) =
+                    ui.allocate_exact_size(egui::vec2(16.0, 22.0), egui::Sense::click());
+                paint_disclosure(ui.painter(), rect, expanded);
+                if response.clicked() {
+                    toggle_folder = true;
+                }
+            } else {
+                ui.add_space(16.0);
+            }
+            let icon = if is_directory {
+                TreeIcon::Folder { expanded }
+            } else {
+                tree_file_icon(path)
+            };
+            let (icon_rect, _) =
+                ui.allocate_exact_size(egui::vec2(18.0, 22.0), egui::Sense::hover());
+            paint_tree_icon(ui.painter(), icon_rect, icon);
+            let selected = open_document == Some(self.active_document);
+            if ui.selectable_label(selected, name.as_ref()).clicked() {
+                if is_directory {
+                    toggle_folder = true;
+                } else {
+                    open_file = true;
+                }
+            }
+        });
+
+        if toggle_folder {
+            if expanded {
+                self.expanded_folders.remove(path);
+            } else {
+                self.expanded_folders.insert(path.to_path_buf());
+            }
+        }
+        if open_file {
+            self.open_path(path.to_path_buf());
+        }
+        if is_directory && self.expanded_folders.contains(path) {
+            for child in self.workspace_entries(path) {
+                self.show_folder_row(ui, &child, depth + 1);
+            }
+        }
+    }
+
+    fn workspace_entries(&self, folder: &Path) -> Vec<PathBuf> {
+        let mut entries: Vec<PathBuf> = fs::read_dir(folder)
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name().is_some_and(|name| name != ".git")
+                    && path.file_name().is_some_and(|name| name != "sublime_text")
+                    && path
+                        .file_name()
+                        .is_some_and(|name| name != "sublime_text_build_4215_x64.tar.xz")
+            })
+            .collect();
+        entries.sort_by_key(|path| {
+            let is_file = path.is_file();
+            (
+                is_file,
+                path.file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_lowercase(),
+            )
+        });
+        entries
     }
 
     fn close_document(&mut self, index: usize) {
@@ -214,7 +374,6 @@ impl eframe::App for SublemonApp {
 
                 ui.menu_button("View", |ui| {
                     ui.checkbox(&mut self.sidebar_visible, "Show Sidebar");
-                    ui.checkbox(&mut self.minimap_visible, "Show Minimap");
                     ui.checkbox(&mut self.status_bar_visible, "Show Status Bar");
                     ui.separator();
                     ui.checkbox(&mut self.word_wrap, "Word Wrap");
@@ -249,224 +408,251 @@ impl eframe::App for SublemonApp {
             });
         });
 
-        egui::Panel::top("tabs").show(ui, |ui| {
-            ui.add_space(3.0);
-            egui::ScrollArea::horizontal()
-                .id_salt("document_tabs")
-                .auto_shrink([false, true])
+        if self.status_bar_visible {
+            egui::Panel::bottom("status_bar")
+                .frame(egui::Frame::new().fill(STATUS))
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 8.0;
-                        let mut close_index = None;
-                        for (index, document) in self.documents.iter().enumerate() {
-                            let active = index == self.active_document;
-                            let title = document.title(index + 1);
-                            let title = if document.is_dirty() {
-                                format!("● {title}")
-                            } else {
-                                title
-                            };
-                            let tab = egui::Frame::new()
-                                .fill(if active { TAB_ACTIVE } else { UI })
-                                .inner_margin(egui::Margin::symmetric(10, 5));
-                            tab.show(ui, |ui| {
-                                ui.horizontal(|ui| {
-                                    if ui.selectable_label(active, title).clicked() {
-                                        self.active_document = index;
-                                    }
-                                    if ui.small_button("×").clicked() {
-                                        close_index = Some(index);
+                        ui.label("◧");
+                        ui.label(format!(
+                            "Line {}, Column {}",
+                            self.cursor_line, self.cursor_column
+                        ));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let language = self
+                                .active_document()
+                                .path
+                                .as_ref()
+                                .and_then(|path| path.extension())
+                                .map_or("Plain Text", |extension| {
+                                    if extension.eq_ignore_ascii_case("md") {
+                                        "Markdown"
+                                    } else {
+                                        "Plain Text"
                                     }
                                 });
-                            });
-                        }
-
-                        if let Some(index) = close_index {
-                            self.close_document(index);
-                        }
-
-                        if ui.small_button("+").clicked() {
-                            self.new_document();
-                        }
+                            ui.label(language);
+                            ui.label("UTF-8").on_hover_text(format!(
+                                "UTF-8 · {}",
+                                self.active_document().line_ending.label()
+                            ));
+                            ui.separator();
+                            ui.label("Tab Size: 4");
+                            ui.separator();
+                            ui.label("main ②");
+                        });
                     });
                 });
-        });
-
-        if self.status_bar_visible {
-            egui::Panel::bottom("status_bar").show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label("Plain Text");
-                    ui.separator();
-                    ui.label(format!(
-                        "Line {}, Column {}",
-                        self.cursor_line, self.cursor_column
-                    ));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label("UTF-8");
-                        ui.separator();
-                        ui.label(self.active_document().line_ending.label());
-                        ui.separator();
-                        ui.label("Tab Size: 4");
-                    });
-                });
-            });
         }
 
         if self.sidebar_visible {
-            egui::Panel::left("sidebar")
+            let sidebar_default_size = (ui.ctx().content_rect().width() * 0.43).clamp(250.0, 550.0);
+            egui::Panel::left("sidebar_layout_v2")
+                .frame(egui::Frame::new().fill(SIDEBAR))
                 .resizable(true)
-                .default_size(210.0)
+                .default_size(sidebar_default_size)
+                .min_size(0.0)
                 .show(ui, |ui| {
-                    ui.add_space(8.0);
+                    ui.painter().rect_filled(ui.max_rect(), 0.0, SIDEBAR);
+                    ui.add_space(12.0);
                     ui.horizontal(|ui| {
-                        ui.strong("OPEN FILES");
+                        ui.strong("FOLDERS");
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             let _ = ui.small_button("⋯");
                         });
                     });
-                    ui.separator();
-                    for (index, document) in self.documents.iter().enumerate() {
-                        let selected = index == self.active_document;
-                        let title = document.title(index + 1);
-                        let title = if document.is_dirty() {
-                            format!("● {title}")
-                        } else {
-                            title
-                        };
-                        if ui
-                            .selectable_label(selected, format!("▤  {title}"))
-                            .clicked()
-                        {
-                            self.active_document = index;
-                        }
-                    }
-                });
-        }
-
-        egui::Panel::left("line_numbers")
-            .resizable(false)
-            .default_size(46.0)
-            .show(ui, |ui| {
-                ui.painter().rect_filled(ui.max_rect(), 0.0, GUTTER);
-                let line_count = document_line_count(&self.active_document().text);
-                egui::ScrollArea::vertical()
-                    .id_salt("line_number_scroll")
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        ui.add_space(8.0);
-                        for line in 1..=line_count {
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                                ui.add_sized(
-                                    [32.0, 19.0],
-                                    egui::Label::new(
-                                        egui::RichText::new(line.to_string())
-                                            .monospace()
-                                            .size(12.0)
-                                            .color(egui::Color32::from_rgb(117, 113, 94)),
-                                    ),
-                                );
-                            });
-                        }
-                    });
-            });
-
-        if self.minimap_visible {
-            egui::Panel::right("minimap")
-                .resizable(false)
-                .default_size(104.0)
-                .show(ui, |ui| {
-                    ui.painter().rect_filled(
-                        ui.max_rect(),
-                        0.0,
-                        egui::Color32::from_rgb(39, 40, 34),
-                    );
-                    let text = self.active_document().text.clone();
-                    ui.add_space(5.0);
-                    egui::ScrollArea::vertical()
-                        .id_salt("minimap_scroll")
-                        .auto_shrink([false, false])
-                        .show(ui, |ui| {
-                            ui.add(
-                                egui::Label::new(
-                                    egui::RichText::new(text)
-                                        .monospace()
-                                        .size(5.5)
-                                        .color(egui::Color32::from_rgb(155, 151, 127)),
-                                )
-                                .wrap_mode(egui::TextWrapMode::Extend),
-                            );
-                        });
+                    ui.add_space(10.0);
+                    self.show_folder_row(ui, &self.workspace_root.clone(), 0);
                 });
         }
 
         egui::CentralPanel::default_margins()
             .frame(egui::Frame::new().fill(EDITOR).inner_margin(0))
             .show(ui, |ui| {
-                let document_index = self.active_document;
-                let document = &mut self.documents[document_index];
-                let editor_id = egui::Id::new(("sublemon_editor", document.id));
-                if prepare_enter_indentation(ui.ctx(), editor_id, &mut document.text) {
-                    if let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), editor_id) {
-                        let end = document.text.chars().count();
-                        state
-                            .cursor
-                            .set_char_range(Some(egui::text::CCursorRange::one(
-                                egui::text::CCursor::new(end),
-                            )));
-                        state.store(ui.ctx(), editor_id);
-                    }
-                }
-                let editor = egui::TextEdit::multiline(&mut document.text)
-                    .id(editor_id)
-                    .font(egui::TextStyle::Monospace)
-                    .desired_width(if self.word_wrap {
-                        ui.available_width()
-                    } else {
-                        f32::INFINITY
-                    })
-                    .desired_rows(40)
-                    .frame(egui::Frame::NONE)
-                    .margin(egui::Margin::symmetric(8, 8))
-                    .code_editor()
-                    .interactive(!document.read_only);
-                let output = editor.show(ui);
-                let mut cursor_range = output.cursor_range;
-                if let Some(command) = self.pending_edit_command.take() {
-                    let current_range = cursor_range.unwrap_or_else(|| {
-                        egui::text::CCursorRange::one(egui::text::CCursor::new(
-                            document.text.chars().count(),
-                        ))
-                    });
-                    let current = (current_range, document.text.clone());
-                    let mut undoer = output.state.undoer();
-                    let replacement = match command {
-                        EditCommand::Undo => undoer.undo(&current).cloned(),
-                        EditCommand::Redo => undoer.redo(&current).cloned(),
-                        EditCommand::SelectAll => Some((
-                            egui::text::CCursorRange::two(
-                                egui::text::CCursor::new(0),
-                                egui::text::CCursor::new(document.text.chars().count()),
-                            ),
-                            document.text.clone(),
-                        )),
-                    };
-                    if let Some((range, text)) = replacement {
-                        document.text = text;
-                        cursor_range = Some(range);
-                        let mut state = output.state;
-                        state.cursor.set_char_range(Some(range));
-                        state.store(ui.ctx(), output.response.id);
-                    }
-                }
-                if let Some(cursor_range) = cursor_range {
-                    let cursor_index: usize = cursor_range.primary.index.into();
-                    let prefix: String = document.text.chars().take(cursor_index).collect();
-                    self.cursor_line = document_line_count(&prefix);
-                    self.cursor_column = prefix
-                        .rsplit('\n')
-                        .next()
-                        .map_or(1, |line| line.chars().count() + 1);
-                }
+                self.show_tabs(ui);
+                let gutter_width = 56.0;
+                let content_width = ui.available_width();
+                let content_height = ui.available_height();
+                let editor_width =
+                    (content_width - gutter_width - ui.spacing().item_spacing.x).max(1.0);
+                let chars_per_visual_line =
+                    ((editor_width - 16.0) / (14.0 * 0.60)).floor().max(1.0) as usize;
+                let text_for_gutter = self.active_document().text.clone();
+                ui.horizontal_top(|ui| {
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(gutter_width, content_height),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            ui.painter().rect_filled(ui.max_rect(), 0.0, GUTTER);
+                            ui.add_space(8.0);
+                            egui::ScrollArea::vertical()
+                                .id_salt("line_number_scroll")
+                                .auto_shrink([false, false])
+                                .show(ui, |ui| {
+                                    for (index, line_text) in
+                                        text_for_gutter.split('\n').enumerate()
+                                    {
+                                        let line = index + 1;
+                                        let line_height = 19.0;
+                                        if line == self.cursor_line {
+                                            ui.painter().rect_filled(
+                                                egui::Rect::from_min_size(
+                                                    ui.cursor().min,
+                                                    egui::vec2(ui.available_width(), line_height),
+                                                ),
+                                                0.0,
+                                                egui::Color32::from_rgb(70, 80, 94),
+                                            );
+                                        }
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Min),
+                                            |ui| {
+                                                ui.add_sized(
+                                                    [42.0, line_height],
+                                                    egui::Label::new(
+                                                        egui::RichText::new(line.to_string())
+                                                            .monospace()
+                                                            .size(12.0)
+                                                            .color(egui::Color32::from_rgb(
+                                                                118, 133, 153,
+                                                            )),
+                                                    ),
+                                                );
+                                            },
+                                        );
+                                        let wrapped_rows = if self.word_wrap {
+                                            line_text
+                                                .chars()
+                                                .count()
+                                                .max(1)
+                                                .div_ceil(chars_per_visual_line)
+                                        } else {
+                                            1
+                                        };
+                                        for _ in 1..wrapped_rows {
+                                            ui.add_space(line_height);
+                                        }
+                                    }
+                                });
+                        },
+                    );
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(editor_width, content_height),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            let document_index = self.active_document;
+                            let document = &mut self.documents[document_index];
+                            let editor_id = egui::Id::new(("sublemon_editor", document.id));
+                            if egui::TextEdit::load_state(ui.ctx(), editor_id).is_none() {
+                                let mut state = egui::TextEdit::load_state(ui.ctx(), editor_id)
+                                    .unwrap_or_default();
+                                let mut caret = 0;
+                                for (line_index, line) in
+                                    document.text.split('\n').take(9).enumerate()
+                                {
+                                    caret += line.chars().count();
+                                    if line_index < 8 {
+                                        caret += 1;
+                                    }
+                                }
+                                state
+                                    .cursor
+                                    .set_char_range(Some(egui::text::CCursorRange::one(
+                                        egui::text::CCursor::new(
+                                            caret.min(document.text.chars().count()),
+                                        ),
+                                    )));
+                                state.store(ui.ctx(), editor_id);
+                            }
+                            if prepare_enter_indentation(ui.ctx(), editor_id, &mut document.text) {
+                                if let Some(mut state) =
+                                    egui::TextEdit::load_state(ui.ctx(), editor_id)
+                                {
+                                    let end = document.text.chars().count();
+                                    state.cursor.set_char_range(Some(
+                                        egui::text::CCursorRange::one(egui::text::CCursor::new(
+                                            end,
+                                        )),
+                                    ));
+                                    state.store(ui.ctx(), editor_id);
+                                }
+                            }
+                            let is_markdown = document
+                                .path
+                                .as_ref()
+                                .and_then(|path| path.extension())
+                                .is_some_and(|extension| extension.eq_ignore_ascii_case("md"));
+                            let mut layouter =
+                                |ui: &egui::Ui, buffer: &dyn egui::TextBuffer, wrap_width: f32| {
+                                    let mut job = if is_markdown {
+                                        markdown_layout(buffer.as_str(), wrap_width)
+                                    } else {
+                                        egui::text::LayoutJob::simple(
+                                            buffer.as_str().to_owned(),
+                                            egui::FontId::monospace(14.0),
+                                            egui::Color32::from_rgb(204, 205, 207),
+                                            wrap_width,
+                                        )
+                                    };
+                                    job.wrap.max_width = wrap_width;
+                                    ui.fonts_mut(|fonts| fonts.layout_job(job))
+                                };
+                            let editor = egui::TextEdit::multiline(&mut document.text)
+                                .id(editor_id)
+                                .font(egui::TextStyle::Monospace)
+                                .desired_width(if self.word_wrap {
+                                    ui.available_width()
+                                } else {
+                                    f32::INFINITY
+                                })
+                                .desired_rows(40)
+                                .frame(egui::Frame::NONE)
+                                .margin(egui::Margin::symmetric(8, 8))
+                                .code_editor()
+                                .layouter(&mut layouter)
+                                .interactive(!document.read_only);
+                            let output = editor.show(ui);
+                            let mut cursor_range = output.cursor_range;
+                            if let Some(command) = self.pending_edit_command.take() {
+                                let current_range = cursor_range.unwrap_or_else(|| {
+                                    egui::text::CCursorRange::one(egui::text::CCursor::new(
+                                        document.text.chars().count(),
+                                    ))
+                                });
+                                let current = (current_range, document.text.clone());
+                                let mut undoer = output.state.undoer();
+                                let replacement = match command {
+                                    EditCommand::Undo => undoer.undo(&current).cloned(),
+                                    EditCommand::Redo => undoer.redo(&current).cloned(),
+                                    EditCommand::SelectAll => Some((
+                                        egui::text::CCursorRange::two(
+                                            egui::text::CCursor::new(0),
+                                            egui::text::CCursor::new(document.text.chars().count()),
+                                        ),
+                                        document.text.clone(),
+                                    )),
+                                };
+                                if let Some((range, text)) = replacement {
+                                    document.text = text;
+                                    cursor_range = Some(range);
+                                    let mut state = output.state;
+                                    state.cursor.set_char_range(Some(range));
+                                    state.store(ui.ctx(), output.response.id);
+                                }
+                            }
+                            if let Some(cursor_range) = cursor_range {
+                                let cursor_index: usize = cursor_range.primary.index.into();
+                                let prefix: String =
+                                    document.text.chars().take(cursor_index).collect();
+                                self.cursor_line = document_line_count(&prefix);
+                                self.cursor_column = prefix
+                                    .rsplit('\n')
+                                    .next()
+                                    .map_or(1, |line| line.chars().count() + 1);
+                            }
+                        },
+                    );
+                });
             });
 
         if let Some(dialog) = self.path_dialog {
@@ -648,15 +834,232 @@ fn char_to_byte(text: &str, character_index: usize) -> usize {
         .map_or(text.len(), |(byte_index, _)| byte_index)
 }
 
+fn tree_file_icon(path: &Path) -> TreeIcon {
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    if matches!(name.as_ref(), "Cargo.toml" | "Cargo.lock" | ".gitignore") {
+        return TreeIcon::Config;
+    }
+
+    match path
+        .extension()
+        .map(|extension| extension.to_string_lossy().to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("md" | "markdown") => TreeIcon::Markdown,
+        Some("rs") => TreeIcon::Rust,
+        Some("png" | "jpg" | "jpeg" | "gif" | "svg" | "webp") => TreeIcon::Image,
+        Some("toml" | "json" | "yaml" | "yml" | "ini" | "conf") => TreeIcon::Config,
+        _ => TreeIcon::Text,
+    }
+}
+
+fn paint_disclosure(painter: &egui::Painter, rect: egui::Rect, expanded: bool) {
+    let center = rect.center();
+    let color = egui::Color32::from_rgb(145, 157, 174);
+    let points = if expanded {
+        [
+            egui::pos2(center.x - 3.0, center.y - 1.0),
+            egui::pos2(center.x + 3.0, center.y - 1.0),
+            egui::pos2(center.x, center.y + 3.0),
+        ]
+    } else {
+        [
+            egui::pos2(center.x - 1.0, center.y - 3.0),
+            egui::pos2(center.x - 1.0, center.y + 3.0),
+            egui::pos2(center.x + 3.0, center.y),
+        ]
+    };
+    painter.add(egui::Shape::convex_polygon(
+        points.to_vec(),
+        color,
+        egui::Stroke::NONE,
+    ));
+}
+
+fn paint_tree_icon(painter: &egui::Painter, slot: egui::Rect, icon: TreeIcon) {
+    let left = slot.left() + 1.0;
+    let top = slot.top() + 3.0;
+    let center = slot.center();
+    let outline = egui::Color32::from_rgb(149, 164, 183);
+    let page_fill = egui::Color32::from_rgb(53, 59, 69);
+    match icon {
+        TreeIcon::Folder { expanded } => {
+            let fill = egui::Color32::from_rgb(121, 139, 160);
+            let points = vec![
+                egui::pos2(left, top + 4.0),
+                egui::pos2(left, top + 1.0),
+                egui::pos2(left + 6.5, top + 1.0),
+                egui::pos2(left + 8.5, top + 3.0),
+                egui::pos2(left + 15.0, top + 3.0),
+                egui::pos2(left + 15.0, top + 13.0),
+                egui::pos2(left, top + 13.0),
+            ];
+            painter.add(egui::Shape::convex_polygon(
+                points,
+                fill,
+                egui::Stroke::new(0.8, outline),
+            ));
+            if expanded {
+                painter.line_segment(
+                    [
+                        egui::pos2(left + 1.0, top + 7.0),
+                        egui::pos2(left + 14.0, top + 7.0),
+                    ],
+                    egui::Stroke::new(0.8, egui::Color32::from_rgb(188, 199, 213)),
+                );
+            }
+        }
+        file_kind => {
+            let accent = match file_kind {
+                TreeIcon::Markdown => egui::Color32::from_rgb(153, 177, 210),
+                TreeIcon::Rust => egui::Color32::from_rgb(218, 142, 105),
+                TreeIcon::Image => egui::Color32::from_rgb(131, 177, 145),
+                TreeIcon::Config => egui::Color32::from_rgb(195, 177, 128),
+                TreeIcon::Text | TreeIcon::Folder { .. } => outline,
+            };
+            let page = vec![
+                egui::pos2(left + 2.0, top),
+                egui::pos2(left + 10.0, top),
+                egui::pos2(left + 14.0, top + 4.0),
+                egui::pos2(left + 14.0, top + 15.0),
+                egui::pos2(left + 2.0, top + 15.0),
+            ];
+            painter.add(egui::Shape::convex_polygon(
+                page,
+                page_fill,
+                egui::Stroke::new(0.9, outline),
+            ));
+            painter.line_segment(
+                [
+                    egui::pos2(left + 10.0, top + 0.5),
+                    egui::pos2(left + 10.0, top + 4.0),
+                ],
+                egui::Stroke::new(0.8, outline),
+            );
+            painter.line_segment(
+                [
+                    egui::pos2(left + 10.0, top + 4.0),
+                    egui::pos2(left + 13.5, top + 4.0),
+                ],
+                egui::Stroke::new(0.8, outline),
+            );
+            match file_kind {
+                TreeIcon::Markdown | TreeIcon::Rust => {
+                    let label = if matches!(file_kind, TreeIcon::Markdown) {
+                        "M"
+                    } else {
+                        "R"
+                    };
+                    painter.text(
+                        egui::pos2(center.x, top + 10.0),
+                        egui::Align2::CENTER_CENTER,
+                        label,
+                        egui::FontId::proportional(8.0),
+                        accent,
+                    );
+                }
+                TreeIcon::Image => {
+                    painter.circle_filled(egui::pos2(left + 6.0, top + 7.0), 1.0, accent);
+                    painter.add(egui::Shape::convex_polygon(
+                        vec![
+                            egui::pos2(left + 3.0, top + 13.0),
+                            egui::pos2(left + 6.0, top + 9.0),
+                            egui::pos2(left + 8.0, top + 11.0),
+                            egui::pos2(left + 10.0, top + 8.0),
+                            egui::pos2(left + 13.0, top + 13.0),
+                        ],
+                        accent,
+                        egui::Stroke::NONE,
+                    ));
+                }
+                TreeIcon::Config | TreeIcon::Text => {
+                    for line in 0..3 {
+                        let y = top + 7.0 + line as f32 * 2.5;
+                        painter.line_segment(
+                            [egui::pos2(left + 4.0, y), egui::pos2(left + 11.0, y)],
+                            egui::Stroke::new(0.8, accent),
+                        );
+                    }
+                }
+                TreeIcon::Folder { .. } => unreachable!(),
+            }
+        }
+    }
+}
+
+fn markdown_layout(text: &str, wrap_width: f32) -> egui::text::LayoutJob {
+    let mut job = egui::text::LayoutJob::default();
+    job.wrap.max_width = wrap_width;
+    let body_color = egui::Color32::from_rgb(205, 206, 210);
+    let heading_color = egui::Color32::from_rgb(179, 199, 226);
+    let marker_color = egui::Color32::from_rgb(230, 116, 72);
+    let bold_color = egui::Color32::from_rgb(190, 198, 224);
+
+    for line in text.split_inclusive('\n') {
+        let trimmed = line.trim_start();
+        let hashes = trimmed
+            .chars()
+            .take_while(|character| *character == '#')
+            .count();
+        if hashes > 0 {
+            let leading = line.len() - trimmed.len();
+            let marker_end = (leading
+                + hashes
+                + trimmed[hashes..]
+                    .chars()
+                    .take_while(|character| *character == ' ')
+                    .count())
+            .min(line.len());
+            job.append(
+                &line[..marker_end],
+                0.0,
+                egui::TextFormat::simple(egui::FontId::monospace(14.0), marker_color),
+            );
+            append_markdown_body(&mut job, &line[marker_end..], heading_color, bold_color);
+        } else {
+            append_markdown_body(&mut job, line, body_color, bold_color);
+        }
+    }
+    job
+}
+
+fn append_markdown_body(
+    job: &mut egui::text::LayoutJob,
+    text: &str,
+    body_color: egui::Color32,
+    bold_color: egui::Color32,
+) {
+    let normal = egui::TextFormat::simple(egui::FontId::monospace(14.0), body_color);
+    let bold = egui::TextFormat::simple(egui::FontId::monospace(14.0), bold_color);
+    let marker = egui::TextFormat::simple(
+        egui::FontId::monospace(14.0),
+        egui::Color32::from_rgb(205, 135, 173),
+    );
+    let mut remaining = text;
+    while let Some(start) = remaining.find("**") {
+        job.append(&remaining[..start], 0.0, normal.clone());
+        let after_start = &remaining[start + 2..];
+        let Some(end) = after_start.find("**") else {
+            job.append(&remaining[start..], 0.0, normal);
+            return;
+        };
+        job.append("**", 0.0, marker.clone());
+        job.append(&after_start[..end], 0.0, bold.clone());
+        job.append("**", 0.0, marker.clone());
+        remaining = &after_start[end + 2..];
+    }
+    job.append(remaining, 0.0, normal);
+}
+
 fn apply_dark_editor_style(context: &egui::Context) {
     let mut visuals = egui::Visuals::dark();
     visuals.panel_fill = UI;
     visuals.window_fill = UI;
     visuals.extreme_bg_color = EDITOR;
     visuals.code_bg_color = EDITOR;
-    visuals.faint_bg_color = egui::Color32::from_rgb(52, 53, 47);
-    visuals.selection.bg_fill = egui::Color32::from_rgb(73, 72, 62);
-    visuals.selection.stroke.color = ACCENT;
+    visuals.faint_bg_color = egui::Color32::from_rgb(57, 62, 73);
+    visuals.selection.bg_fill = egui::Color32::from_rgb(70, 80, 94);
+    visuals.selection.stroke.color = egui::Color32::from_rgb(173, 186, 207);
     visuals.widgets.noninteractive.bg_fill = UI;
     visuals.widgets.inactive.bg_fill = UI;
     visuals.widgets.inactive.fg_stroke.color = egui::Color32::from_rgb(205, 205, 198);

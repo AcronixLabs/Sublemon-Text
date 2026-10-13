@@ -9,8 +9,8 @@ fn main() -> eframe::Result<()> {
     let icon = load_icon();
     let viewport = egui::ViewportBuilder::default()
         .with_title("Sublemon")
-        .with_inner_size([1120.0, 760.0])
-        .with_min_inner_size([720.0, 480.0])
+        .with_inner_size([627.0, 692.0])
+        .with_min_inner_size([480.0, 360.0])
         .with_icon(icon);
 
     let options = eframe::NativeOptions {
