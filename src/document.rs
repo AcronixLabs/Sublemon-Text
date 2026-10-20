@@ -37,6 +37,10 @@ struct FileStamp {
 impl FileStamp {
     fn read(path: &Path) -> io::Result<Self> {
         let bytes = fs::read(path)?;
+        Self::from_bytes(path, &bytes)
+    }
+
+    fn from_bytes(path: &Path, bytes: &[u8]) -> io::Result<Self> {
         let modified = fs::metadata(path)
             .ok()
             .and_then(|meta| meta.modified().ok());
@@ -52,9 +56,10 @@ impl FileStamp {
 
 pub struct Document {
     pub id: u64,
+    revision: u64,
     pub path: Option<PathBuf>,
     pub text: String,
-    saved_text: String,
+    dirty: bool,
     pub line_ending: LineEnding,
     baseline: Option<FileStamp>,
     pub read_only: bool,
@@ -64,9 +69,10 @@ impl Document {
     pub fn untitled() -> Self {
         Self {
             id: NEXT_DOCUMENT_ID.fetch_add(1, Ordering::Relaxed),
+            revision: 0,
             path: None,
             text: String::new(),
-            saved_text: String::new(),
+            dirty: false,
             line_ending: LineEnding::Lf,
             baseline: None,
             read_only: false,
@@ -74,11 +80,19 @@ impl Document {
     }
 
     pub fn is_dirty(&self) -> bool {
-        self.text != self.saved_text
+        self.dirty
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+    pub fn mark_changed(&mut self) {
+        self.revision = self.revision.wrapping_add(1);
+        self.dirty = true;
     }
 
     pub fn discard_changes(&mut self) {
-        self.text.clone_from(&self.saved_text);
+        self.dirty = false;
     }
 
     pub fn title(&self, number: usize) -> String {
@@ -97,6 +111,8 @@ impl Document {
 
     pub fn open(path: &Path) -> io::Result<Self> {
         let bytes = fs::read(path)?;
+        let canonical = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let baseline = Some(FileStamp::from_bytes(&canonical, &bytes)?);
         let source = String::from_utf8(bytes).map_err(|error| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -104,13 +120,12 @@ impl Document {
             )
         })?;
         let line_ending = detect_line_ending(&source);
-        let text = source.replace("\r\n", "\n").replace('\r', "\n");
-        let canonical = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-        let baseline = Some(FileStamp::read(&canonical)?);
+        let text = normalize_newlines(source);
         Ok(Self {
             id: NEXT_DOCUMENT_ID.fetch_add(1, Ordering::Relaxed),
+            revision: 0,
             path: Some(canonical),
-            saved_text: text.clone(),
+            dirty: false,
             text,
             line_ending,
             baseline,
@@ -161,15 +176,16 @@ impl Document {
             }
         }
         let serialized = match self.line_ending {
-            LineEnding::Lf => self.text.clone(),
-            LineEnding::Crlf => self.text.replace('\n', "\r\n"),
-            LineEnding::Cr => self.text.replace('\n', "\r"),
+            LineEnding::Lf => None,
+            LineEnding::Crlf => Some(self.text.replace('\n', "\r\n")),
+            LineEnding::Cr => Some(self.text.replace('\n', "\r")),
         };
-        fs::write(path, serialized.as_bytes())?;
+        let bytes = serialized.as_deref().unwrap_or(&self.text).as_bytes();
+        fs::write(path, bytes)?;
         let canonical = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         self.path = Some(canonical.clone());
-        self.baseline = Some(FileStamp::read(&canonical)?);
-        self.saved_text.clone_from(&self.text);
+        self.baseline = Some(FileStamp::from_bytes(&canonical, bytes)?);
+        self.dirty = false;
         self.read_only = false;
         Ok(())
     }
@@ -185,6 +201,25 @@ impl Document {
         *self = replacement;
         Ok(())
     }
+}
+
+fn normalize_newlines(source: String) -> String {
+    if !source.contains('\r') {
+        return source;
+    }
+    let mut normalized = String::with_capacity(source.len());
+    let mut chars = source.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\r' {
+            if chars.peek() == Some(&'\n') {
+                chars.next();
+            }
+            normalized.push('\n');
+        } else {
+            normalized.push(ch);
+        }
+    }
+    normalized
 }
 
 fn detect_line_ending(text: &str) -> LineEnding {

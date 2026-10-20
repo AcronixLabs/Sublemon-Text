@@ -19,10 +19,20 @@ pub struct LspClient {
 }
 
 impl LspClient {
-    pub fn start(command: &str, root: &Path) -> io::Result<Self> {
-        let (program, args) = parse_command(command)?;
-        let mut child = Command::new(program)
-            .args(args)
+    pub fn start_builtin(root: &Path) -> io::Result<Self> {
+        let app_program = std::env::current_exe()?;
+        let server_name = format!("sublemon-lsp{}", std::env::consts::EXE_SUFFIX);
+        let server_program = app_program.with_file_name(server_name);
+        let has_companion = server_program.is_file();
+        let mut command = if has_companion {
+            Command::new(server_program)
+        } else {
+            Command::new(app_program)
+        };
+        if !has_companion {
+            command.arg("--lsp-server");
+        }
+        let mut child = command
             .current_dir(root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -54,7 +64,17 @@ impl LspClient {
                     "textDocument": {
                         "synchronization": { "dynamicRegistration": false, "willSave": false, "didSave": false },
                         "publishDiagnostics": { "relatedInformation": true },
-                        "completion": { "completionItem": { "snippetSupport": false } }
+                        "completion": {
+                            "dynamicRegistration": false,
+                            "completionItem": {
+                                "snippetSupport": false,
+                                "documentationFormat": ["markdown", "plaintext"],
+                                "deprecatedSupport": true,
+                                "preselectSupport": true,
+                                "tagSupport": { "valueSet": [1] }
+                            },
+                            "completionList": { "itemDefaults": ["editRange", "insertTextFormat", "insertTextMode", "data"] }
+                        }
                     },
                     "workspace": { "workspaceFolders": { "supported": true, "changeNotifications": true } }
                 },
@@ -276,60 +296,6 @@ impl Drop for LspClient {
     fn drop(&mut self) {
         self.shutdown();
     }
-}
-
-fn parse_command(command: &str) -> io::Result<(String, Vec<String>)> {
-    let mut words = Vec::new();
-    let mut word = String::new();
-    let mut quote = None;
-    let mut escaped = false;
-    let mut characters = command.trim().chars().peekable();
-    while let Some(character) = characters.next() {
-        if escaped {
-            word.push(character);
-            escaped = false;
-        } else if character == '\\' && quote != Some('\'') {
-            if characters
-                .peek()
-                .is_some_and(|next| next.is_whitespace() || matches!(next, '\\' | '\'' | '"'))
-            {
-                escaped = true;
-            } else {
-                word.push(character);
-            }
-        } else if matches!(character, '\'' | '"') {
-            if quote == Some(character) {
-                quote = None;
-            } else if quote.is_none() {
-                quote = Some(character);
-            } else {
-                word.push(character);
-            }
-        } else if character.is_whitespace() && quote.is_none() {
-            if !word.is_empty() {
-                words.push(std::mem::take(&mut word));
-            }
-        } else {
-            word.push(character);
-        }
-    }
-    if escaped || quote.is_some() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "unclosed quote or escape in server command",
-        ));
-    }
-    if !word.is_empty() {
-        words.push(word);
-    }
-    if words.is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "enter a language server command",
-        ));
-    }
-    let program = words.remove(0);
-    Ok((program, words))
 }
 
 fn write_message(writer: &mut impl Write, value: &Value) -> io::Result<()> {

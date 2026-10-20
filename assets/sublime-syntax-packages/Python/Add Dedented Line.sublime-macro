@@ -1,4 +1,0 @@
-[
-	{"command": "insert", "args": {"characters": "\n"}},
-	{"command": "unindent"}
-]

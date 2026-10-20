@@ -1,6 +1,0 @@
-{
-    "match_brackets_angle": true,
-    
-    // Default word boundaries except: $
-    "word_separators": "./\\()\"'-:,.;<>~!@#%^&*|+=[]{}`~?"
-}

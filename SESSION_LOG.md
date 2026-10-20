@@ -1,68 +1,41 @@
 # Session log
 
-## 2026-10-13 — light theme, native open dialogs, performance plan
+## 2026-10-14 — Move the native UI from egui to Floem
 
-- Added a View-menu light theme toggle with coordinated UI/editor and syntax colors. Dark remains the default; saving the selected theme is future work.
-- Replaced the path-entry actions for File → Open → File/Folder with native system dialogs through `rfd`; folder open changes the project root while Project → Add Folder remains the multi-root operation.
-- Added `rfd` 0.17.2 and MIT attribution to third-party notices.
-- Expanded PLAN step 10 with fixed workload sizes, baseline metrics and targets, visible viewport/incremental syntax work, async filesystem tasks, and an engine rewrite gate based on profiling.
-- Validation: `cargo fmt`, `cargo check --offline`, and `git diff --check` passed. No GUI/picker check or performance profiling was performed.
+- Replaced the active eframe/egui dependency with Floem 0.2 and launched a new Floem frontend from `src/main.rs`.
+- Added `src/floem_app.rs` with the native window/icon, document tabs, virtualized file list, open/save/folder/package actions, Markdown preview, theme toggle, and keyboard shortcuts.
+- Added `src/floem_syntax.rs` to apply bundled Syntect syntax definitions and Sublemon palettes through Floem's editor styling interface.
+- Kept existing in-progress egui adapter and LSP files in the worktree but excluded them from the active build, preserving user changes for later reconciliation.
+- Updated `AGENTS.md`, `PLAN.md`, `README.md`, and third-party notices to reflect Floem and the current migration gaps.
+- Ran `cargo fmt` and `cargo check --offline`; both completed successfully. No tests were run and the GUI was not launched in this session.
+- Remaining active-UI gaps include LSP, menu command parity, persisted workspace/multi-root state, dirty-close confirmation, and background project scanning.
 
-## 2026-10-13 — renderer selection and editor allocation reduction
+## 2026-10-14 — Prepare pixel-fidelity handoff
 
-- Configured eframe to use its available `wgpu` renderer for GPU-accelerated UI rendering. Hardware adapter use depends on system support; no runtime GPU measurement was made.
-- Removed a complete active-document string clone from per-frame line gutter calculations, retaining only per-line character counts. Preview rows are prepared only in preview mode.
-- Documented rendering caveats in README and updated HANDOFF.
-- Validation: `cargo fmt`, `cargo check --offline`, and `git diff --check` passed. No benchmark or GUI profiling was run.
+- Reworked `HANDOFF.md` into a detailed next-session task focused on restoring screenshot-level UI fidelity in the active Floem frontend.
+- Documented the 941 × 1038 reference dimensions, screenshot composition, stale pre-Floem baseline, relevant source/assets/tools, staged implementation order, and visual verification target.
+- Recorded worktree preservation and remaining Floem migration caveats for the next agent.
 
-## 2026-10-13 — auto-pairs and Markdown preview
+## 2026-10-14 — Fix Floem reactive borrow panic
 
-- Added automatic pairing for parentheses, brackets, braces, quotes, and backticks in the editor; selections are wrapped and existing closing characters are skipped over.
-- Added a `Ctrl+Shift+V` toggle for a scrollable lightweight Markdown preview. It styles headings, list items, block quotes, and fenced-code markers; full CommonMark and inline formatting are not implemented.
-- Documented the feature and shortcut in README and updated HANDOFF.
-- Validation: `cargo fmt`, `cargo check --offline`, and `git diff --check` passed. GUI interaction was not manually exercised.
+- Moved active-tab signal updates out of mutable `tabs.update` closures in new-tab creation and file opening. Floem may rerun subscribers synchronously during signal updates, so writing `active` while `tabs` remains mutably borrowed could panic when subscribers read the tab list.
+- Ran `cargo fmt` and `cargo check --offline`; both succeeded with only existing dead-code warnings.
+- Launched `cargo run --bin sublemon` in the desktop session after the change; it remained running without the reported panic. Stopped the app after startup verification. Did not exercise UI controls or run tests.
 
-## 2026-10-13 — bundled language packages and syntax highlighting
+## 2026-10-17 — Disable Rust Analyzer autostart
 
-- Fetched the user-requested `sublimehq/Packages` repository at commit `f3ab97b3a1440ecf2645dd287f37c7e9807c1d45` and included all 48 package folders (202 `.sublime-syntax` files) under `assets/sublime-syntax-packages/`. Preserved the repository license and Rust package's separate MIT license; added upstream revision and third-party notices.
-- Verified from the repository README that this source is syntax-highlighting packages; Sublime's LSP implementation is a different repository. Sublemon continues to use its own LSP client and does not run Sublime plugins.
-- Added a Syntect-backed editor layouter and independently authored Sublemon syntax colors. Built a compact syntax database into `assets/sublemon-syntaxes.packdump`; Syntect parsed 78 syntax files directly, while unsupported definitions remain included and fall back to Syntect defaults or plain text.
-- Added `cargo run --bin rebuild_syntax_data` for regenerating the compiled database. Parsing all source grammar files at normal app build time took several minutes, so the compiled packdump is checked in and standard builds no longer compile the grammar corpus.
-- Updated `AGENTS.md`, README, plan, handoff, and third-party notices to document the authorized data-vendoring exception and the LSP distinction.
-- Validation: `cargo fmt` and `cargo check --offline` passed. No GUI or per-language highlighting review was performed.
+- Removed the `rust-analyzer` command from the project `.sublemon.json` settings and removed automatic rust-analyzer selection for Rust files.
+- Kept generic LSP support and other language-server defaults; an explicitly configured server command can still be used. Saving project settings with no command now removes the command field instead of persisting an empty value.
+- Updated README usage and HANDOFF state.
+- `cargo fmt` and `cargo check --offline` passed. No rust-analyzer process was running during the check.
 
-## 2026-10-13 — `.sublime-package` archive import
+## 2026-10-19 — Large-file path, built-in language service, and welcome startup
 
-- Added **File → Import Sublime Package…**. It extracts a selected ZIP package to `.sublemon/packages/<package-name>` under the primary project and adds that directory to project roots for browsing.
-- Added safeguards for archive entry paths, symbolic links, duplicate/existing destinations, 10,000-entry maximum, 64 MiB per entry, and 256 MiB aggregate unpacked content. Extraction occurs in a temporary staging directory and is renamed into place after success.
-- Package contents are treated as data; Sublemon does not execute Sublime Text package code. Added `.sublemon/packages/` to `.gitignore` to avoid accidental redistribution.
-- Added the `zip` dependency and documented its MIT/Apache-2.0 license in README.
-- Validation: `cargo fmt`, `cargo check --offline`, and `git diff --check` passed. GUI/archive import was not manually exercised.
-
-## 2026-10-13 — editor text scrolling
-
-- Fixed the editor layout by placing the line-number gutter and multiline text editor inside one shared vertical `ScrollArea`.
-- The scroll content height is calculated from the document's visual rows, accounting for word wrapping, so the complete document can scroll while gutter rows remain vertically aligned.
-- Validation: `cargo fmt`, `cargo check --offline`, and `git diff --check` passed. GUI scrolling was not manually exercised.
-
-## 2026-10-13 — LSP navigation, completion, hover, and project settings
-
-- Added LSP navigation requests for definitions, declarations, type definitions, implementations, and references. Results accept `Location` and `LocationLink`; navigation opens the target file, restores the cursor, and records a back location. Added F12, Shift+F12, and Alt+Left actions.
-- Added UTF-16 position conversion between editor character offsets and LSP coordinates for Unicode text.
-- Added Ctrl+Space completion requests and a selectable results popup. Completion items can apply server-provided edits or replace the current identifier prefix.
-- Added hover requests and a hover-content window reachable through **Goto → Show Hover**.
-- Added per-project `.sublemon.json` persistence for workspace roots and the configured language-server command. Opening/replacing a project reads its settings; importing a folder and starting/configuring a server save them.
-- Updated README usage, PLAN milestone notes, and this handoff to reflect the implementation and remaining LSP features.
-- Validation: `cargo fmt`, `cargo check --offline`, and `git diff --check` passed. No real server or GUI interaction was exercised.
-
-## 2026-10-13 — project scrolling, folders, attribution, and LSP foundation
-
-- Wrapped the project tree in a virtualized vertical scroll area using `show_rows`; added a two-second directory listing cache so expanded folders are not rescanned every frame.
-- Implemented **File → Open Folder…** to replace the current root and **Project → Add Folder to Project…** to import multiple directory roots.
-- Added a stdio JSON-RPC LSP client with initialization, server-request replies, workspace folder notifications, document synchronization, and published diagnostics.
-- Confirmed Material Icon Theme attribution and bundled its MIT license.
-- `cargo fmt` and `cargo check --offline` passed. No real language server or GUI interaction was exercised.
-
-## Earlier icon work
-
-- Bundled Material Icon Theme v5.39.0 file/folder assets and generated associations; see `assets/material-icon-theme/ATTRIBUTION.md` and the repository history.
+- Removed the bundled Sublime syntax packages, generated syntax dump, archive importer, archive menu path, and Syntect/ZIP dependencies. Replaced grammar-based styling with an original lightweight token scanner and updated dependency notices and clean-room instructions.
+- Added a local stdio JSON-RPC LSP server in `src/lsp_server.rs`, launched automatically as a Sublemon subprocess for open workspaces. It provides lexical completion, hover, local navigation/references, document symbols, and unmatched-delimiter diagnostics. It skips open documents larger than 512 KiB and does not start external language servers.
+- Added a standalone `sublemon-lsp` binary so normal builds can run the protocol service without starting a second GUI process; development falls back to the GUI executable if the companion has not been built.
+- Reduced large-file open/render overhead: open/decode/hash and initial metrics now happen on a worker; removed the duplicate saved-text copy and duplicate file read; large files skip syntax coloring and wrapping; gutter rendering uses visible rows; line metric rebuilds are deferred briefly after edits.
+- Added global recent-project persistence and a Welcome screen. The new state file has no prior history, so first startup after this change shows Welcome; opening a folder remembers it, and a later startup selects the latest existing project.
+- Replaced the stale Floem migration handoff with current architecture, limitations, verification, and next steps. Updated README, PLAN, AGENTS, and third-party notices to reflect the removed package ecosystem and in-tree language service.
+- `cargo fmt` and `cargo check --offline` passed. No tests were run and the GUI was not launched.
+- Remaining issue: egui `TextEdit` shapes the entire active buffer, so very large files may still be slow during editing/scrolling. A viewport-rendered rope/piece-table editor and runtime profiling remain necessary before claiming large-file performance is fixed.

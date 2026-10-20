@@ -1,12 +1,15 @@
+use crate::app_state::AppState;
 use crate::document::Document;
+use crate::editor_metrics::LineMetrics;
 use crate::lsp::{LspClient, offset_from_position, uri_to_path};
-use crate::sublime_package::extract_package;
 use eframe::egui;
 use std::{
     collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
     sync::OnceLock,
+    sync::mpsc::{self, Receiver, TryRecvError},
+    thread,
     time::Instant,
 };
 
@@ -115,6 +118,10 @@ struct CompletionCandidate {
 }
 
 pub struct SublemonApp {
+    welcome_screen: bool,
+    app_state: AppState,
+    pending_file_opens: Vec<Receiver<(PathBuf, std::io::Result<(Document, Option<LineMetrics>)>)>>,
+    pending_open_paths: HashSet<PathBuf>,
     documents: Vec<Document>,
     active_document: usize,
     sidebar_visible: bool,
@@ -125,6 +132,9 @@ pub struct SublemonApp {
     cursor_line: usize,
     cursor_column: usize,
     cursor_offsets: HashMap<u64, usize>,
+    line_metrics: HashMap<u64, LineMetrics>,
+    line_metrics_pending: HashMap<u64, Instant>,
+    lsp_auto_attempted_for: Option<u64>,
     pending_navigations: HashMap<i64, PendingNavigation>,
     navigation_history: Vec<EditorLocation>,
     navigation_results: Vec<NavigationTarget>,
@@ -148,7 +158,6 @@ pub struct SublemonApp {
     tree_icon_textures: HashMap<String, egui::TextureHandle>,
     lsp: Option<LspClient>,
     lsp_status: String,
-    lsp_command: String,
     lsp_documents_opened: bool,
     lsp_diagnostic_count: usize,
     lsp_diagnostics: HashMap<String, Vec<String>>,
@@ -158,30 +167,36 @@ pub struct SublemonApp {
 enum PathDialog {
     SaveAs,
     ImportFolder,
-    StartLsp,
-    ImportSublimePackage,
 }
 
 impl Default for SublemonApp {
     fn default() -> Self {
-        let workspace_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let (workspace_roots, lsp_command, settings_error) = load_project_settings(&workspace_root)
-            .unwrap_or_else(|error| {
+        let app_state = AppState::load();
+        let remembered_project = app_state.recent_projects.first().cloned();
+        let (workspace_roots, settings_error) = if let Some(root) = &remembered_project {
+            load_project_settings(root).unwrap_or_else(|error| {
                 (
-                    vec![workspace_root.clone()],
-                    String::new(),
-                    Some(format!("Could not read .sublemon.json: {error}")),
+                    vec![root.clone()],
+                    Some(format!("Could not read project settings: {error}")),
                 )
-            });
-        let mut documents: Vec<Document> = ["README.md", "AGENTS.md"]
-            .into_iter()
-            .filter_map(|name| Document::open(&workspace_root.join(name)).ok())
+            })
+        } else {
+            (Vec::new(), None)
+        };
+        let mut documents: Vec<Document> = remembered_project
+            .iter()
+            .flat_map(|root| ["README.md", "AGENTS.md"].map(|name| root.join(name)))
+            .filter_map(|path| Document::open(&path).ok())
             .collect();
         if documents.is_empty() {
             documents.push(Document::untitled());
         }
         let expanded_folders = workspace_roots.iter().cloned().collect();
         Self {
+            welcome_screen: workspace_roots.is_empty(),
+            app_state,
+            pending_file_opens: Vec::new(),
+            pending_open_paths: HashSet::new(),
             documents,
             active_document: 0,
             sidebar_visible: true,
@@ -192,6 +207,9 @@ impl Default for SublemonApp {
             cursor_line: 1,
             cursor_column: 1,
             cursor_offsets: HashMap::new(),
+            line_metrics: HashMap::new(),
+            line_metrics_pending: HashMap::new(),
+            lsp_auto_attempted_for: None,
             pending_navigations: HashMap::new(),
             navigation_history: Vec::new(),
             navigation_results: Vec::new(),
@@ -214,8 +232,7 @@ impl Default for SublemonApp {
             expanded_folders,
             tree_icon_textures: HashMap::new(),
             lsp: None,
-            lsp_status: "LSP stopped".to_owned(),
-            lsp_command,
+            lsp_status: "Built-in LSP starting".to_owned(),
             lsp_documents_opened: false,
             lsp_diagnostic_count: 0,
             lsp_diagnostics: HashMap::new(),
@@ -225,6 +242,7 @@ impl Default for SublemonApp {
 
 impl SublemonApp {
     fn new_document(&mut self) {
+        self.welcome_screen = false;
         self.documents.push(Document::untitled());
         self.active_document = self.documents.len() - 1;
     }
@@ -447,42 +465,98 @@ impl SublemonApp {
     }
 
     fn open_path(&mut self, path: PathBuf) {
-        match Document::open(&path) {
-            Ok(document) => {
-                let mut was_new = false;
-                if let Some(existing) = self
-                    .documents
-                    .iter()
-                    .position(|item| item.path == document.path)
-                {
-                    self.active_document = existing;
-                } else {
-                    self.documents.push(document);
-                    self.active_document = self.documents.len() - 1;
-                    was_new = true;
-                }
-                if was_new {
-                    self.notify_active_document_open();
-                }
-                self.message = None;
+        let path = fs::canonicalize(&path).unwrap_or(path);
+        if self.welcome_screen {
+            if let Some(parent) = path.parent() {
+                self.open_folder(parent.to_path_buf());
             }
-            Err(error) => self.message = Some(format!("Could not open file: {error}")),
+        }
+        if let Some(index) = self
+            .documents
+            .iter()
+            .position(|item| item.path.as_deref() == Some(path.as_path()))
+        {
+            self.active_document = index;
+            return;
+        }
+        if !self.pending_open_paths.insert(path.clone()) {
+            return;
+        }
+        let (sender, receiver) = mpsc::channel();
+        let task_path = path.clone();
+        let spawned = thread::Builder::new()
+            .name("sublemon-file-open".into())
+            .spawn(move || {
+                let result = Document::open(&task_path).map(|document| {
+                    let metrics = (document.text.len() > 512 * 1024)
+                        .then(|| LineMetrics::new(&document.text, document.revision(), usize::MAX));
+                    (document, metrics)
+                });
+                let _ = sender.send((task_path, result));
+            });
+        match spawned {
+            Ok(_) => {
+                self.pending_file_opens.push(receiver);
+                self.message = Some(format!("Opening {}…", path.display()));
+            }
+            Err(error) => {
+                self.pending_open_paths.remove(&path);
+                self.message = Some(format!("Could not start file loading: {error}"));
+            }
+        }
+    }
+
+    fn poll_file_opens(&mut self) {
+        let mut completed = Vec::new();
+        for (index, receiver) in self.pending_file_opens.iter().enumerate() {
+            match receiver.try_recv() {
+                Ok((path, result)) => completed.push((index, Some(path), Some(result))),
+                Err(TryRecvError::Disconnected) => completed.push((index, None, None)),
+                Err(TryRecvError::Empty) => {}
+            }
+        }
+        for (index, path, result) in completed.into_iter().rev() {
+            self.pending_file_opens.remove(index);
+            if let Some(path) = path {
+                self.pending_open_paths.remove(&path);
+                match result.expect("completed open result") {
+                    Ok((document, metrics)) => {
+                        let document_id = document.id;
+                        if self.documents.len() == 1
+                            && self.documents[0].path.is_none()
+                            && self.documents[0].text.is_empty()
+                        {
+                            self.documents[0] = document;
+                            self.active_document = 0;
+                        } else {
+                            self.documents.push(document);
+                            self.active_document = self.documents.len() - 1;
+                        }
+                        if let Some(metrics) = metrics {
+                            self.line_metrics.insert(document_id, metrics);
+                        }
+                        self.message = None;
+                        self.notify_active_document_open();
+                    }
+                    Err(error) => self.message = Some(format!("Could not open file: {error}")),
+                }
+            }
         }
     }
 
     fn open_folder(&mut self, path: PathBuf) {
         match canonical_folder(&path) {
             Ok(root) => {
-                let (roots, command, settings_error) =
+                let (roots, settings_error) =
                     load_project_settings(&root).unwrap_or_else(|error| {
                         (
                             vec![root.clone()],
-                            String::new(),
                             Some(format!("Could not read .sublemon.json: {error}")),
                         )
                     });
                 self.workspace_roots = roots;
-                self.lsp_command = command;
+                self.welcome_screen = false;
+                self.app_state.remember_project(root.clone());
                 self.expanded_folders.clear();
                 self.expanded_folders
                     .extend(self.workspace_roots.iter().cloned());
@@ -510,47 +584,13 @@ impl SublemonApp {
                     let roots: Vec<_> = self.workspace_roots.iter().map(PathBuf::as_path).collect();
                     let _ = lsp.sync_workspace_folders(&roots);
                 }
-                self.message = save_project_settings(&self.workspace_roots, &self.lsp_command)
+                self.message = save_project_settings(&self.workspace_roots)
                     .err()
                     .map(|error| {
                         format!("Folder added, but project settings were not saved: {error}")
                     });
             }
             Err(error) => self.message = Some(format!("Could not add folder: {error}")),
-        }
-    }
-
-    fn import_sublime_package(&mut self, archive: PathBuf) {
-        let Some(project_root) = self.workspace_roots.first().cloned() else {
-            self.message = Some("Open a project folder before importing a package.".into());
-            return;
-        };
-        let packages_dir = project_root.join(".sublemon").join("packages");
-        match extract_package(&archive, &packages_dir) {
-            Ok(package_root) => {
-                self.workspace_roots.push(package_root.clone());
-                self.expanded_folders.insert(package_root.clone());
-                self.workspace_entries_cache.clear();
-                if let Some(lsp) = self.lsp.as_mut() {
-                    let roots: Vec<_> = self.workspace_roots.iter().map(PathBuf::as_path).collect();
-                    let _ = lsp.sync_workspace_folders(&roots);
-                }
-                self.message = save_project_settings(&self.workspace_roots, &self.lsp_command)
-                    .err()
-                    .map(|error| {
-                        format!("Package imported, but project settings were not saved: {error}")
-                    });
-                if self.message.is_none() {
-                    self.message = Some(format!(
-                        "Imported {} as package files. Package code is not executed.",
-                        package_root
-                            .file_name()
-                            .unwrap_or_default()
-                            .to_string_lossy()
-                    ));
-                }
-            }
-            Err(error) => self.message = Some(format!("Could not import package: {error}")),
         }
     }
 
@@ -610,6 +650,10 @@ impl SublemonApp {
     }
 
     fn request_completion(&mut self) {
+        self.request_completion_with_trigger(1);
+    }
+
+    fn request_completion_with_trigger(&mut self, trigger_kind: u8) {
         self.completion_items.clear();
         self.completion_document_id = None;
         let Some(document) = self.documents.get(self.active_document) else {
@@ -631,7 +675,7 @@ impl SublemonApp {
             &path,
             &text,
             character_offset,
-            serde_json::json!({ "context": { "triggerKind": 1 } }),
+            serde_json::json!({ "context": { "triggerKind": trigger_kind } }),
         ) {
             Ok(id) => {
                 self.pending_completions.insert(
@@ -702,6 +746,7 @@ impl SublemonApp {
         document
             .text
             .replace_range(start_byte..end_byte, &candidate.insert_text);
+        document.mark_changed();
         let new_offset = start + candidate.insert_text.chars().count();
         let path = document.path.clone();
         let document_id = document.id;
@@ -808,31 +853,6 @@ impl SublemonApp {
             .map_or(1, |line| line.chars().count() + 1);
     }
 
-    fn start_language_server(&mut self, command: &str) {
-        if self.lsp.is_some() {
-            self.stop_language_server();
-        }
-        let Some(root) = self.workspace_roots.first() else {
-            self.message = Some("Add a project folder before starting a language server.".into());
-            return;
-        };
-        self.lsp_command = command.trim().to_owned();
-        let settings_error = save_project_settings(&self.workspace_roots, &self.lsp_command).err();
-        match LspClient::start(command, root) {
-            Ok(client) => {
-                self.lsp = Some(client);
-                self.lsp_status = "Starting language server…".into();
-                self.lsp_documents_opened = false;
-                self.lsp_diagnostic_count = 0;
-                self.lsp_diagnostics.clear();
-                self.message = settings_error.map(|error| {
-                    format!("Language server started, but project settings were not saved: {error}")
-                });
-            }
-            Err(error) => self.message = Some(format!("Could not start language server: {error}")),
-        }
-    }
-
     fn poll_language_server(&mut self, context: &egui::Context) {
         let (messages, ready) = match self.lsp.as_mut() {
             Some(lsp) => (lsp.poll(), lsp.is_ready()),
@@ -919,6 +939,9 @@ impl SublemonApp {
                     .documents
                     .iter()
                     .filter_map(|document| {
+                        if document.text.len() > 512 * 1024 {
+                            return None;
+                        }
                         document
                             .path
                             .as_ref()
@@ -940,17 +963,32 @@ impl SublemonApp {
                 lsp.stop();
             }
             self.lsp_status = "Language server exited".into();
+            self.lsp_auto_attempted_for = None;
         }
     }
 
-    fn stop_language_server(&mut self) {
-        if let Some(lsp) = self.lsp.take() {
-            lsp.stop();
+    fn ensure_language_server_for_active_document(&mut self) {
+        let Some(root) = self.workspace_roots.first() else {
+            return;
+        };
+        if self.lsp.is_some() || self.lsp_auto_attempted_for == Some(u64::MAX) {
+            return;
         }
-        self.lsp_status = "LSP stopped".into();
-        self.lsp_documents_opened = false;
-        self.lsp_diagnostic_count = 0;
-        self.lsp_diagnostics.clear();
+        self.lsp_auto_attempted_for = Some(u64::MAX);
+        match LspClient::start_builtin(root) {
+            Ok(client) => {
+                self.lsp = Some(client);
+                self.lsp_status = "Starting Sublemon language service…".into();
+                self.lsp_documents_opened = false;
+                self.lsp_diagnostic_count = 0;
+                self.lsp_diagnostics.clear();
+            }
+            Err(error) => {
+                self.message = Some(format!(
+                    "Could not start built-in language service: {error}"
+                ))
+            }
+        }
     }
 
     fn save_active(&mut self) {
@@ -981,6 +1019,8 @@ impl SublemonApp {
 
 impl eframe::App for SublemonApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.poll_file_opens();
+        self.ensure_language_server_for_active_document();
         self.poll_language_server(ui.ctx());
         let (definition, references, back, completion) = ui.input_mut(|input| {
             (
@@ -1066,11 +1106,6 @@ impl eframe::App for SublemonApp {
                             ui.close();
                         }
                     });
-                    if ui.button("Import Sublime Package…").clicked() {
-                        self.path_input.clear();
-                        self.path_dialog = Some(PathDialog::ImportSublimePackage);
-                        ui.close();
-                    }
                     ui.separator();
                     if ui.button("Save").clicked() {
                         if self.documents[self.active_document].path.is_some() {
@@ -1195,15 +1230,7 @@ impl eframe::App for SublemonApp {
                         self.path_dialog = Some(PathDialog::ImportFolder);
                         ui.close();
                     }
-                    if ui.button("Start Language Server…").clicked() {
-                        self.path_input.clone_from(&self.lsp_command);
-                        self.path_dialog = Some(PathDialog::StartLsp);
-                        ui.close();
-                    }
-                    if self.lsp.is_some() && ui.button("Stop Language Server").clicked() {
-                        self.stop_language_server();
-                        ui.close();
-                    }
+                    ui.label(&self.lsp_status);
                 });
 
                 ui.menu_button("Preferences", |ui| {
@@ -1219,7 +1246,7 @@ impl eframe::App for SublemonApp {
             });
         });
 
-        if self.status_bar_visible {
+        if self.status_bar_visible && !self.welcome_screen {
             egui::Panel::bottom("status_bar")
                 .frame(egui::Frame::new().fill(colors.status))
                 .show(ui, |ui| {
@@ -1268,7 +1295,7 @@ impl eframe::App for SublemonApp {
                 });
         }
 
-        if self.sidebar_visible {
+        if self.sidebar_visible && !self.welcome_screen {
             let sidebar_default_size = (ui.ctx().content_rect().width() * 0.43).clamp(250.0, 550.0);
             egui::Panel::left("sidebar_layout_v2")
                 .frame(egui::Frame::new().fill(colors.sidebar))
@@ -1300,24 +1327,87 @@ impl eframe::App for SublemonApp {
         }
 
         let mut lsp_change = None;
+        let mut request_completion_on_change = false;
         egui::CentralPanel::default_margins()
             .frame(egui::Frame::new().fill(colors.editor).inner_margin(0))
             .show(ui, |ui| {
+                if self.welcome_screen {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space((ui.available_height() * 0.20).max(48.0));
+                        ui.heading(egui::RichText::new("Sublemon").size(34.0));
+                        ui.add_space(8.0);
+                        ui.label("A focused workspace for your code.");
+                        ui.add_space(22.0);
+                        if ui.button("Open Project…").clicked()
+                            && let Some(path) = rfd::FileDialog::new().pick_folder()
+                        {
+                            self.open_folder(path);
+                        }
+                        if ui.button("Open File…").clicked()
+                            && let Some(path) = rfd::FileDialog::new().pick_file()
+                        {
+                            self.open_path(path);
+                        }
+                        let recent_projects = self.app_state.recent_projects.clone();
+                        if !recent_projects.is_empty() {
+                            ui.add_space(18.0);
+                            ui.weak("Recent projects");
+                            for project in recent_projects {
+                                let label = project.to_string_lossy().into_owned();
+                                if ui.small_button(label).clicked() {
+                                    self.open_folder(project);
+                                }
+                            }
+                        }
+                        if !self.pending_open_paths.is_empty() {
+                            ui.add_space(12.0);
+                            ui.spinner();
+                            ui.label("Loading file in the background…");
+                        }
+                    });
+                    return;
+                }
                 self.show_tabs(ui, colors);
                 let gutter_width = 56.0;
                 let content_width = ui.available_width();
                 let editor_width =
                     (content_width - gutter_width - ui.spacing().item_spacing.x).max(1.0);
+                let large_document = self.active_document().text.len() > 512 * 1024;
+                let effective_word_wrap = self.word_wrap && !large_document;
                 let chars_per_visual_line =
                     ((editor_width - 16.0) / (14.0 * 0.60)).floor().max(1.0) as usize;
                 // Keep only line lengths for gutter sizing instead of cloning the full
                 // document on every UI frame, which was costly for large files.
-                let line_char_counts: Vec<usize> = self
-                    .active_document()
-                    .text
-                    .lines()
-                    .map(|line| line.chars().count())
-                    .collect();
+                let document_id = self.active_document().id;
+                let wrap_width_chars = if effective_word_wrap {
+                    chars_per_visual_line
+                } else {
+                    usize::MAX
+                };
+                let revision = self.active_document().revision();
+                let metrics_current = self
+                    .line_metrics
+                    .get(&document_id)
+                    .is_some_and(|metrics| metrics.matches(revision, wrap_width_chars));
+                let metrics_can_be_deferred = large_document
+                    && self
+                        .line_metrics
+                        .get(&document_id)
+                        .is_some_and(|metrics| metrics.matches_wrap_width(wrap_width_chars))
+                    && self
+                        .line_metrics_pending
+                        .get(&document_id)
+                        .is_some_and(|since| {
+                            since.elapsed() < std::time::Duration::from_millis(250)
+                        });
+                if !metrics_current && !metrics_can_be_deferred {
+                    self.line_metrics.insert(
+                        document_id,
+                        LineMetrics::new(&self.active_document().text, revision, wrap_width_chars),
+                    );
+                    self.line_metrics_pending.remove(&document_id);
+                }
+                let metrics = &self.line_metrics[&document_id];
                 let preview_lines: Vec<_> = if self.markdown_preview {
                     self.active_document()
                         .text
@@ -1327,16 +1417,7 @@ impl eframe::App for SublemonApp {
                 } else {
                     Vec::new()
                 };
-                let visual_rows = line_char_counts
-                    .iter()
-                    .map(|character_count| {
-                        if self.word_wrap {
-                            (*character_count).max(1).div_ceil(chars_per_visual_line)
-                        } else {
-                            1
-                        }
-                    })
-                    .sum::<usize>();
+                let visual_rows = metrics.visual_rows();
                 // TextEdit itself does not scroll its contents. Put the gutter and editor
                 // inside one shared viewport and give the row its full document height, so
                 // wheel/trackpad scrolling moves both columns together.
@@ -1364,66 +1445,61 @@ impl eframe::App for SublemonApp {
                                     egui::vec2(gutter_width, content_height),
                                     egui::Layout::top_down(egui::Align::Min),
                                     |ui| {
-                                        ui.painter().rect_filled(ui.max_rect(), 0.0, colors.gutter);
-                                        ui.add_space(8.0);
-                                        {
-                                            for (index, character_count) in
-                                                line_char_counts.iter().enumerate()
-                                            {
-                                                let line = index + 1;
-                                                let line_height = 19.0;
-                                                if line == self.cursor_line {
-                                                    ui.painter().rect_filled(
+                                        let rect = ui.max_rect();
+                                        let painter = ui.painter();
+                                        painter.rect_filled(rect, 0.0, colors.gutter);
+                                        let line_height = 19.0;
+                                        let text_top = rect.top() + 8.0;
+                                        let clip = ui.clip_rect();
+                                        let first_row = ((clip.top() - text_top) / line_height)
+                                            .floor()
+                                            .max(0.0)
+                                            as usize;
+                                        let end_row = ((clip.bottom() - text_top) / line_height)
+                                            .ceil()
+                                            .max(first_row as f32)
+                                            as usize;
+                                        let visible_lines =
+                                            metrics.lines_in_visual_rows(first_row, end_row);
+                                        let active_line_color = if colors.is_light {
+                                            egui::Color32::from_rgb(222, 229, 240)
+                                        } else {
+                                            egui::Color32::from_rgb(70, 80, 94)
+                                        };
+                                        let number_color = if colors.is_light {
+                                            egui::Color32::from_rgb(105, 115, 130)
+                                        } else {
+                                            egui::Color32::from_rgb(118, 133, 153)
+                                        };
+                                        for index in visible_lines {
+                                            let line = index + 1;
+                                            let first_line_row = metrics.visual_row_start(index);
+                                            if line == self.cursor_line {
+                                                for row in first_line_row
+                                                    ..first_line_row
+                                                        + metrics.line_visual_rows(index)
+                                                {
+                                                    painter.rect_filled(
                                                         egui::Rect::from_min_size(
-                                                            ui.cursor().min,
-                                                            egui::vec2(
-                                                                ui.available_width(),
-                                                                line_height,
+                                                            egui::pos2(
+                                                                rect.left(),
+                                                                text_top + row as f32 * line_height,
                                                             ),
+                                                            egui::vec2(rect.width(), line_height),
                                                         ),
                                                         0.0,
-                                                        if colors.is_light {
-                                                            egui::Color32::from_rgb(222, 229, 240)
-                                                        } else {
-                                                            egui::Color32::from_rgb(70, 80, 94)
-                                                        },
+                                                        active_line_color,
                                                     );
                                                 }
-                                                ui.with_layout(
-                                                    egui::Layout::right_to_left(egui::Align::Min),
-                                                    |ui| {
-                                                        ui.add_sized(
-                                                            [42.0, line_height],
-                                                            egui::Label::new(
-                                                                egui::RichText::new(
-                                                                    line.to_string(),
-                                                                )
-                                                                .monospace()
-                                                                .size(12.0)
-                                                                .color(if colors.is_light {
-                                                                    egui::Color32::from_rgb(
-                                                                        105, 115, 130,
-                                                                    )
-                                                                } else {
-                                                                    egui::Color32::from_rgb(
-                                                                        118, 133, 153,
-                                                                    )
-                                                                }),
-                                                            ),
-                                                        );
-                                                    },
-                                                );
-                                                let wrapped_rows = if self.word_wrap {
-                                                    (*character_count)
-                                                        .max(1)
-                                                        .div_ceil(chars_per_visual_line)
-                                                } else {
-                                                    1
-                                                };
-                                                for _ in 1..wrapped_rows {
-                                                    ui.add_space(line_height);
-                                                }
                                             }
+                                            let y = text_top + first_line_row as f32 * line_height;
+                                            painter.text(
+                                                egui::pos2(rect.right() - 8.0, y),
+                                                egui::Align2::RIGHT_TOP,
+                                                line.to_string(),
+                                                egui::FontId::monospace(12.0),
+                                                number_color,
+                                            );
                                         }
                                     },
                                 );
@@ -1477,31 +1553,20 @@ impl eframe::App for SublemonApp {
                                             }
                                         }
                                         let syntax_path = document.path.clone();
+                                        let syntax_revision = document.revision();
                                         let mut layouter =
                                         |ui: &egui::Ui,
                                          buffer: &dyn egui::TextBuffer,
                                          wrap_width: f32| {
-                                            let mut job = crate::syntax::layout(
-                                                buffer.as_str(),
-                                                syntax_path.as_deref(),
-                                                wrap_width,
-                                                colors.is_light,
+                                            crate::syntax::layout_cached(
+                                                ui.ctx(), buffer.as_str(), syntax_revision,
+                                                syntax_path.as_deref(), wrap_width, colors.is_light,
                                             )
-                                            .unwrap_or_else(|| {
-                                                egui::text::LayoutJob::simple(
-                                                    buffer.as_str().to_owned(),
-                                                    egui::FontId::monospace(14.0),
-                                                    colors.foreground,
-                                                    wrap_width,
-                                                )
-                                            });
-                                            job.wrap.max_width = wrap_width;
-                                            ui.fonts_mut(|fonts| fonts.layout_job(job))
                                         };
                                         let editor = egui::TextEdit::multiline(&mut document.text)
                                             .id(editor_id)
                                             .font(egui::TextStyle::Monospace)
-                                            .desired_width(if self.word_wrap {
+                                            .desired_width(if effective_word_wrap {
                                                 ui.available_width()
                                             } else {
                                                 f32::INFINITY
@@ -1514,7 +1579,27 @@ impl eframe::App for SublemonApp {
                                             .interactive(!document.read_only);
                                         let output = editor.show(ui);
                                         if output.response.changed() {
-                                            if let Some(path) = document.path.clone() {
+                                            document.mark_changed();
+                                            if document.text.len() > 512 * 1024 {
+                                                self.line_metrics_pending
+                                                    .insert(document.id, Instant::now());
+                                            }
+                                            request_completion_on_change =
+                                                output.cursor_range.is_some_and(|range| {
+                                                    let cursor: usize = range.primary.index.into();
+                                                    document
+                                                        .text
+                                                        .chars()
+                                                        .take(cursor)
+                                                        .last()
+                                                        .is_some_and(|ch| {
+                                                            ch.is_alphanumeric()
+                                                                || matches!(ch, '_' | '$' | '.')
+                                                        })
+                                                });
+                                            if document.text.len() <= 512 * 1024
+                                                && let Some(path) = document.path.clone()
+                                            {
                                                 lsp_change = Some((path, document.text.clone()));
                                             }
                                         }
@@ -1544,6 +1629,7 @@ impl eframe::App for SublemonApp {
                                             };
                                             if let Some((range, text)) = replacement {
                                                 document.text = text;
+                                                document.mark_changed();
                                                 cursor_range = Some(range);
                                                 let mut state = output.state;
                                                 state.cursor.set_char_range(Some(range));
@@ -1554,13 +1640,8 @@ impl eframe::App for SublemonApp {
                                             let cursor_index: usize =
                                                 cursor_range.primary.index.into();
                                             self.cursor_offsets.insert(document.id, cursor_index);
-                                            let prefix: String =
-                                                document.text.chars().take(cursor_index).collect();
-                                            self.cursor_line = document_line_count(&prefix);
-                                            self.cursor_column = prefix
-                                                .rsplit('\n')
-                                                .next()
-                                                .map_or(1, |line| line.chars().count() + 1);
+                                            (self.cursor_line, self.cursor_column) =
+                                                metrics.cursor_line_column(cursor_index);
                                         }
                                     },
                                 );
@@ -1579,12 +1660,14 @@ impl eframe::App for SublemonApp {
             }
         }
 
+        if request_completion_on_change {
+            self.request_completion_with_trigger(2);
+        }
+
         if let Some(dialog) = self.path_dialog {
             let title = match dialog {
                 PathDialog::SaveAs => "Save As",
                 PathDialog::ImportFolder => "Add Folder to Project",
-                PathDialog::StartLsp => "Start Language Server",
-                PathDialog::ImportSublimePackage => "Import Sublime Package",
             };
             let mut open = true;
             let mut submit = false;
@@ -1596,11 +1679,7 @@ impl eframe::App for SublemonApp {
                 .show(ui.ctx(), |ui| {
                     ui.label(match dialog {
                         PathDialog::SaveAs => "Enter a file path:",
-                        PathDialog::ImportSublimePackage => {
-                            "Enter a .sublime-package archive path:"
-                        }
                         PathDialog::ImportFolder => "Enter a folder path:",
-                        PathDialog::StartLsp => "Enter a language server command and arguments:",
                     });
                     let response = ui
                         .add(egui::TextEdit::singleline(&mut self.path_input).desired_width(360.0));
@@ -1624,11 +1703,6 @@ impl eframe::App for SublemonApp {
                     match dialog {
                         PathDialog::SaveAs => self.save_active_as(path),
                         PathDialog::ImportFolder => self.import_folder(path),
-                        PathDialog::ImportSublimePackage => self.import_sublime_package(path),
-                        PathDialog::StartLsp => {
-                            let command = self.path_input.clone();
-                            self.start_language_server(command.trim());
-                        }
                     }
                 }
                 open = false;
@@ -2028,15 +2102,13 @@ fn canonical_folder(path: &Path) -> std::io::Result<PathBuf> {
     Ok(root)
 }
 
-fn load_project_settings(
-    primary_root: &Path,
-) -> std::io::Result<(Vec<PathBuf>, String, Option<String>)> {
+fn load_project_settings(primary_root: &Path) -> std::io::Result<(Vec<PathBuf>, Option<String>)> {
     let primary = fs::canonicalize(primary_root).unwrap_or_else(|_| primary_root.to_path_buf());
     let settings_path = primary.join(".sublemon.json");
     let source = match fs::read_to_string(&settings_path) {
         Ok(source) => source,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok((vec![primary], String::new(), None));
+            return Ok((vec![primary], None));
         }
         Err(error) => return Err(error),
     };
@@ -2061,14 +2133,10 @@ fn load_project_settings(
             }
         }
     }
-    let command = settings["language_server_command"]
-        .as_str()
-        .unwrap_or_default()
-        .to_owned();
-    Ok((roots, command, None))
+    Ok((roots, None))
 }
 
-fn save_project_settings(roots: &[PathBuf], command: &str) -> std::io::Result<()> {
+fn save_project_settings(roots: &[PathBuf]) -> std::io::Result<()> {
     let Some(primary) = roots.first() else {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -2099,7 +2167,7 @@ fn save_project_settings(roots: &[PathBuf], command: &str) -> std::io::Result<()
                 .collect::<Vec<_>>()
         ),
     );
-    object.insert("language_server_command".into(), serde_json::json!(command));
+    object.remove("language_server_command");
     fs::write(
         path,
         serde_json::to_vec_pretty(&settings).map_err(std::io::Error::other)?,
@@ -2290,6 +2358,11 @@ fn paint_disclosure(painter: &egui::Painter, rect: egui::Rect, expanded: bool) {
 }
 
 fn apply_editor_style(context: &egui::Context, colors: ThemeColors) {
+    context.set_theme(if colors.is_light {
+        egui::Theme::Light
+    } else {
+        egui::Theme::Dark
+    });
     let mut visuals = if colors.is_light {
         egui::Visuals::light()
     } else {

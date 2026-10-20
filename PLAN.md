@@ -9,8 +9,8 @@ This is a staged plan. Each milestone should leave a runnable, coherent applicat
 ## Architecture direction
 
 - **Language:** Rust, edition 2024.
-- **Initial native UI shell:** `eframe`/`egui`, selected for a Rust-native cross-platform app, accessible documentation, and support for app-window icon data. The text editor widget and rendering architecture remain subject to a focused prototype: if the first approach cannot support reliable large-file editing, cursor/selection behavior, IME, accessibility, and performance, replace or specialize it before broad UI work accumulates.
-- **Core model:** Keep documents, file identity, encoding, line endings, selections, undo history, and dirty state separate from frame/UI code. Design the document model to allow a rope or piece-table backend if benchmarks justify it.
+- **Native UI shell:** eframe/egui, with its wgpu renderer and independently authored custom editor layout. Keep UI, document, and language-service layers modular.
+- **Core model:** Keep documents, file identity, encoding, line endings, selections, undo history, and dirty state separate from frame/UI code. Large-file mode currently uses egui `TextEdit`; a virtualized rope-backed buffer is still required to eliminate full-buffer layout cost.
 - **Filesystem and settings:** Use explicit, testable modules for file I/O, workspace state, settings, and project configuration. Never silently overwrite or normalize user data.
 - **Long-running work:** Run directory scans, indexing, builds, and external-tool communication asynchronously, report progress, and keep editing responsive.
 - **Dependencies:** Prefer established, actively maintained Rust crates with compatible licenses. Recheck versions and licenses before release and document them.
@@ -35,6 +35,7 @@ This is a staged plan. Each milestone should leave a runnable, coherent applicat
 ### 3. Establish a capable editing engine
 
 - Prototype text storage and rendering against large files and long lines; decide between the UI toolkit's text widget and a purpose-built editor view.
+- The active frontend uses egui's `TextEdit` with Sublemon-managed line layout, gutter, scrolling, syntax painting, and document state. Continue profiling large files and preserve cursor, selection, wrapping, and undo behavior during rendering work.
 - Implement caret movement, selections, word/line operations, clipboard, undo/redo, indentation, wrapping, and basic keyboard editing.
 - Preserve Unicode grapheme boundaries, IME composition, accessibility semantics, and predictable selection behavior.
 - Add multi-cursor support only after single-cursor behavior and undo semantics are solid.
@@ -55,10 +56,10 @@ This is a staged plan. Each milestone should leave a runnable, coherent applicat
 
 ### 6. Add language awareness
 
-- Add configurable syntax selection and highlighting through an independently licensed grammar/highlighting library or original grammar integrations.
+- Keep syntax selection and highlighting in original Sublemon code; do not bundle third-party editor packages or proprietary editor grammar ecosystems.
 - Provide bracket matching, code folding, indentation rules, comments, snippets, and completion interfaces.
-- Separate syntax highlighting from semantic language services; document which features come from grammars versus language servers.
-- Ensure user settings and package-like customizations can override defaults without editing core code.
+- Keep syntax highlighting separate from the built-in LSP process and document the current lexical behavior and its limits.
+- Design Sublemon-native settings for language behavior without importing editor-specific package formats.
 
 ### 7. Implement projects and workspace persistence
 
@@ -87,7 +88,7 @@ This is a staged plan. Each milestone should leave a runnable, coherent applicat
 - Profile before redesign: build optimized binaries, record cold/warm startup, idle CPU, typing-to-frame p50/p95, scroll frame times, and resident memory on fixed 1 MiB, 10 MiB, and 100 MiB documents. Capture CPU flamegraphs and allocator/RSS snapshots on Linux; repeat on each supported OS before platform claims.
 - Set initial targets on the reference machine: idle CPU below 1% of one core after settling; p95 keystroke-to-visible-frame below 16 ms for 10 MiB; 100 MiB open without UI stalls over 100 ms; and avoid retaining multiple full-size copies of a document. Record hardware, OS, build profile, and results so changes can be compared.
 - First remove full-buffer work from the frame path: virtualize visible editor and gutter rows, cache line layout/width and syntax results by document revision, and update only affected lines after edits. Use incremental parsing/highlighting and avoid building full-document `LayoutJob`s on every redraw.
-- If profiling shows egui's `TextEdit` or contiguous `String` remains the limiting factor, prototype a rope/piece-table buffer with viewport-only shaping and rendering. Compare it against the current editor on the same workload before replacing the editing engine; preserve Unicode, selection, IME, accessibility, and undo behavior.
+- Profile the egui editor and viewport rendering on the same fixed workloads; preserve Unicode, selection, IME, accessibility, and undo behavior while addressing measured bottlenecks.
 - Move directory walks, project indexing, and expensive file metadata work off the UI thread with cancellation, bounded work queues, and cache invalidation. Debounce/coalesce LSP change notifications and avoid copying whole buffers for transient diagnostics or UI state.
 - Treat GPU rendering as a way to accelerate drawing only. It will not speed up text scanning, syntax parsing, disk I/O, or allocations; measure CPU and GPU paths separately and retain a usable fallback where supported.
 - Add crash recovery/autosave policy with clear user expectations after responsiveness and data integrity are measured.
@@ -104,22 +105,19 @@ This is a staged plan. Each milestone should leave a runnable, coherent applicat
 
 | Step | Status | Notes |
 | --- | --- | --- |
-| 1. Native app foundation | Complete | Cargo project, eframe shell, in-memory scratch editing, and supplied icon are implemented; `cargo check --offline` passes and the initial GUI was launched. |
+| 1. Native app foundation | Complete | Cargo project, eframe/egui shell, editable buffer, and supplied icon are implemented; `cargo check --offline` passes. |
 | 2. Document/file model | In progress | Added a standalone UTF-8 document model, normalized editing with detected line-ending preservation, dirty tabs, path-based Open/Save/Save As/Revert, read-only protection, modified-file close prompts, and disk-change/overwrite guards. The current path prompt is a basic text-entry dialog; native file pickers, richer encoding support, and dedicated model tests remain. |
-| 3. Editing engine | In progress | Prototyped around egui's multiline code editor: Unicode-safe character-indexed caret/selection, navigation, clipboard shortcuts, built-in keyboard undo/redo, Tab and Shift+Tab indentation, selectable undo/redo/select-all menu actions, configurable wrapping, and Enter auto-indentation. Editor state is keyed by stable document identity. Large-file profiling, IME/accessibility validation, structural editing commands, and a purpose-built engine decision remain. |
-| 4. Workspace UI | In progress | User requested pixel-level visual fidelity to the supplied target screenshot. The app opens the project README and AGENTS files, shows an expandable project tree beside editor-only tabs, wraps and lightly highlights Markdown, and uses sampled target colors and panel proportions. Removed the nonfunctional text-as-minimap pane after it consumed most of the editor width; the sidebar divider remains draggable, starts at 43% of the viewport, and can collapse to zero width. Moved the gutter into the editor workspace below the tab strip so the tabs align at the sidebar edge as in the reference. Bundled the MIT-licensed Material Icon Theme v5.39.0 pack (904 source SVGs and 48 px PNG textures), with 3,536 generated filename, extension, and folder associations for the project tree. The tree uses a virtualized scroll area and short-lived directory cache. Added `scripts/ui_screenshot_test.py` plus `SCREENSHOT_TESTING.md`; the supplied pre-change screenshot scored 41.28% similarity at tolerance 16, below the 80% target. |
+| 3. Editing engine | In progress | Active frontend uses egui `TextEdit`, custom gutter rendering, and an independently written lightweight token scanner. Large files load asynchronously, skip syntax coloring and wrapping over 512 KiB, and defer full line-metric refresh after keystrokes. egui still lays out the full buffer; benchmark and consider a virtualized rope editor. |
+| 4. Workspace UI | In progress | User requested pixel-level visual fidelity to the supplied target screenshot. The app opens the project README and AGENTS files, shows an expandable project tree beside editor-only tabs, wraps and lightly highlights Markdown, and uses sampled target colors and panel proportions. Removed the nonfunctional text-as-minimap pane after it consumed most of the editor width; the sidebar divider remains draggable, starts at 43% of the viewport, and can collapse to zero width. Moved the gutter into the editor workspace below the tab strip so the tabs align at the sidebar edge as in the reference. Bundled the MIT-licensed Material Icon Theme v5.39.0 pack with filename, extension, and folder associations. The tree uses a virtualized scroll area and short-lived directory cache. Added `scripts/ui_screenshot_test.py` plus `SCREENSHOT_TESTING.md`; the supplied pre-change screenshot scored 41.28% similarity at tolerance 16, below the 80% target. |
 | 5. Search/navigation | Not started | |
-| 6. Language awareness | In progress | Added all 48 package folders from the licensed sublimehq/Packages snapshot and a Syntect-backed syntax renderer using an independently authored Sublemon palette. The bundled snapshot has 202 syntax files; 78 parse directly in Syntect, with its defaults providing fallback highlighting for others. Package code is not executed. LSP supports definition/declaration/type-definition/implementation, references, hover, and completion; snippets, rename, semantic tokens, and code actions remain. |
-| 7. Projects/persistence | In progress | Open-folder and multi-root folder import are available. Primary-root `.sublemon.json` persists workspace roots and the manually launched language-server command. Session/window restoration and richer project settings remain. |
-| 8. Tasks/Git/LSP | In progress | Added a configurable stdio LSP client with JSON-RPC framing, lifecycle and server-request replies, workspace-folder updates, file synchronization, diagnostics, navigation requests/results and history, hover, and completion. Build tasks, code actions, rename, semantic tokens, and richer diagnostic presentation remain. |
-| 9. Extensibility/config | In progress | Added `.sublime-package` ZIP archive import as data: safe extraction into Git-ignored `.sublemon/packages/`, size/count/path/link checks, and workspace-tree access. Package code execution and Sublime-specific APIs are not supported. Broader settings and extension APIs remain. |
-| 10. Reliability/performance | Not started | |
+| 6. Language awareness | In progress | Syntax coloring uses an original lightweight token scanner. A clean-room local LSP process provides lexical completion, hover, local definition/references, document symbols, and delimiter diagnostics for open documents. It does not provide compiler semantics or unopened-file indexing yet. The previously bundled syntax package archive, packdump, and importer have been removed. |
+| 7. Projects/persistence | In progress | Open-folder and multi-root import are available. `.sublemon.json` persists project roots. New app state stores recent projects; first run shows Welcome and later runs reopen the latest valid project. |
+| 8. Tasks/Git/LSP | In progress | The app starts its own stdio JSON-RPC language service for an open project. It skips files over 512 KiB to avoid competing with large-file editing. Build tasks, Git, semantic analysis, unopened-file indexing, code actions, rename, and richer diagnostics remain. No external language-server or editor-plugin ecosystem is launched. |
+| 9. Extensibility/config | Planned | No editor package archive compatibility is included. Design Sublemon-native settings and extension interfaces independently. |
+| 10. Reliability/performance | In progress | File reads moved to a worker, duplicate saved text and duplicate open-time hashing were removed, large-file syntax/wrapping and eager gutter painting were reduced. Need repeatable large-file benchmarks and a viewport-based text buffer to address egui's remaining full-document layout cost. |
 | 11. Packaging/release | Not started | |
 
 ## References
 
-- [Sublemon feature notes](SUBLIME_TEXT_FEATURES.md) — behavioral research and terminology.
-- [Sublime Text official documentation](https://www.sublimetext.com/docs/) — public feature descriptions only.
-- [egui documentation](https://docs.rs/egui/latest/egui/) and [eframe documentation](https://docs.rs/eframe/latest/eframe/) — initial UI toolkit APIs.
-- [eframe native viewport and icon configuration](https://docs.rs/egui/latest/egui/viewport/struct.ViewportBuilder.html).
+- [egui documentation](https://docs.rs/egui/latest/egui/) and [eframe documentation](https://docs.rs/eframe/latest/eframe/) — active UI toolkit, native window, and rendering APIs.
 - [Material Icon Theme](https://github.com/material-extensions/vscode-material-icon-theme) — MIT-licensed file and folder icon assets and association data; license and asset attribution are included in `assets/material-icon-theme/`.

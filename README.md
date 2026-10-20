@@ -1,22 +1,12 @@
-## SubLemon Text
+# Sublemon
 
-Text editing... done correctly.
+## UI framework
 
+The active native application uses eframe/egui, with an independently implemented menu bar, project tree and icons, tabs, editor gutter and scrolling, minimap, status bar, theme toggle, file pickers, and Markdown preview.
 
-Just face it. Most text editors are lemons. VS Code, Cursor, VS, Zed, Lapce, Neovim (btw), EMACS (Eventually Must Aquire all Computer System-resources), IntelliJ, Notepad++, and even tExT eDiToR. 
+On first launch, Sublemon shows a welcome screen. Once a project is opened, its path is saved in the app's user-data directory; subsequent launches reopen the most recently used project. The app-data file is newly introduced, so this version's first launch has no previous project and opens the welcome screen.
 
-Only one editor is everything I need:
-**Sublime Text** 
-
-
-
-
-## Backstory 
-I installed Sublime a couple weeks ago to try the evaluation. And... it had all the feautures: Autocomplete, Rust support, Typescript, C, and Python support. But some things were missing.
-Namely:
-`Zig` support. 
-`Assembly` support.
-So we at Acronix created SubLemon text!
+Sublemon is an original Rust desktop editor with a compact project workspace, tabs, syntax coloring, and a local language service.
 
 ## Third-party assets
 
@@ -24,33 +14,16 @@ The project tree uses icons from [Material Icon Theme](https://github.com/materi
 
 ## Project folders and language servers
 
-- Use **File → Open Folder…** to replace the current project root, or **Project → Add Folder to Project…** to import another folder. Enter its full path in the dialog. Roots and the server command are stored in `.sublemon.json` in the primary project folder.
-- Use **Project → Start Language Server…** to launch an LSP server command (for example, `rust-analyzer`). Sublemon initializes the server, synchronizes open files, and shows published diagnostics from the status bar tooltip. The command is started only after you choose this menu action. Stop it from the Project menu.
-- Use **Goto → Go to Definition** or F12; the same menu offers declaration, type definition, implementation, references, and back navigation. Use Shift+F12 for references, Alt+Left to go back, Ctrl+Space for completions, and **Goto → Show Hover** for hover details.
-
-LSP navigation requests are translated from editor offsets to UTF-16 protocol positions. Completion results can be selected by mouse or keyboard, and server-provided edits are applied to the buffer. The integration also supports hover contents, references lists, diagnostics, workspace-folder updates, and persistent per-project roots/server command. Full snippet expansion, code actions, rename, and richer diagnostic rendering remain unfinished.
+Use **File → Open Folder…** to replace the project root, or **Project → Add Folder to Project…** to add another root. Workspace roots are stored in `.sublemon.json`. A small, in-tree Sublemon language service starts automatically while a project is open. It provides local-document completion, hover, definition/references, document symbols, and unmatched-delimiter diagnostics using lexical scans. It does not launch external language servers, load third-party editor packages, or index unopened project files. It is not a compiler or type checker. Release builds can ship the lightweight `sublemon-lsp` companion binary next to the editor.
 
 ## Editing shortcuts
 
-- `()`, `[]`, `{}`, quotes, and backticks are automatically paired. Typing a matching closer when it is already under the caret moves past it; selected text is wrapped by the pair.
-- Press `Ctrl+Shift+V` to toggle the built-in Markdown preview. It renders common heading levels, list items, block quotes, and fenced-code markers in a scrollable view; press the shortcut again to return to editing.
+- `Ctrl+S` saves the current document, `Ctrl+O` opens a file picker, and `Ctrl+Shift+V` toggles Markdown preview. Brackets and quotes auto-pair, selected text can be wrapped, and typing an existing closer skips over it.
 
-## Rendering and large-file overhead
+## Rendering and themes
 
-The native app selects eframe's `wgpu` renderer, which uses a supported graphics adapter for UI rendering. The editor also avoids making a full copy of the active document just to measure and draw the line-number gutter. Actual GPU use depends on the host's graphics stack; rendering performance has not been benchmarked across machines.
+The native shell uses eframe's wgpu renderer. Use **View → Light Theme** to switch palettes. File and folder actions open native pickers. Large documents load on a worker thread, avoid a duplicate saved-text copy, disable syntax coloring and wrapping above 512 KiB, and only paint visible gutter rows. The language service skips synchronization and diagnostics for documents above that size. Large-file performance has not yet been benchmarked across machines; egui's text widget still lays out the full active buffer, so very large files can remain slow while editing or scrolling.
 
-Use **View → Light Theme** to switch between light and dark editor palettes. **File → Open → File…** and **File → Open → Folder…** open native system pickers. Folder selection replaces the current project root; use **Project → Add Folder to Project…** to add another root.
+## Syntax highlighting
 
-## `.sublime-package` archives
-
-Choose **File → Import Sublime Package…** and enter the archive path. Sublemon safely extracts the ZIP archive under `.sublemon/packages/<package-name>` in the primary project and adds that directory to the project tree. Imported files are ignored by Git so third-party package contents are not accidentally committed. Extraction rejects unsafe paths and symbolic links, and limits archives to 10,000 entries, 64 MiB per file, and 256 MiB total unpacked data. Package contents are available as files for browsing; Sublime Text plugins and other package code are not executed by Sublemon.
-
-ZIP archive support uses the Rust `zip` crate under its MIT license. Its dependency and license metadata are recorded in `Cargo.toml` and `Cargo.lock`.
-
-## Shipped language packages
-
-Sublemon includes the 48 package folders from [sublimehq/Packages](https://github.com/sublimehq/Packages), snapshot `f3ab97b3a1440ecf2645dd287f37c7e9807c1d45`. That repository contains syntax-highlighting packages; it does not contain Sublime's LSP client. All package data and upstream license notices are retained under `assets/sublime-syntax-packages/`. The repository license allows redistribution except where an individual file has its own notice; those notices are kept with their files.
-
-Sublemon compiles compatible `.sublime-syntax` definitions into a bundled Syntect syntax set and uses an independently authored Sublemon color theme. At this revision, Syntect accepts 78 of 202 syntax files directly; the other definitions remain bundled but use a fallback grammar when available or plain text. Rebuild the syntax database after changing the bundled files with `cargo run --bin rebuild_syntax_data`. Sublemon does not execute package plugins. The separate [Sublime LSP project](https://github.com/sublimelsp/LSP) is not bundled; Sublemon's LSP client remains its own implementation.
-
-See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for source revisions, licenses, and asset attribution.
+Syntax styling is implemented in Sublemon with a small token scanner for common programming constructs. It does not load third-party editor package grammars or editor-specific package formats. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for dependency licenses and asset attribution.
