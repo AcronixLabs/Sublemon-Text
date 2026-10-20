@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Sublemon
+Comment=A clean-room Rust text editor
+Exec=sublemon %F
+Icon=sublemon
+Terminal=false
+Categories=Development;TextEditor;
+MimeType=text/plain;

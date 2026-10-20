@@ -22,7 +22,13 @@ Use **File → Open Folder…** to replace the project root, or **Project → Ad
 
 ## Rendering and themes
 
-The native shell uses eframe's wgpu renderer. Use **View → Light Theme** to switch palettes. File and folder actions open native pickers. Large documents load on a worker thread, avoid a duplicate saved-text copy, disable syntax coloring and wrapping above 512 KiB, and only paint visible gutter rows. The language service skips synchronization and diagnostics for documents above that size. Large-file performance has not yet been benchmarked across machines; egui's text widget still lays out the full active buffer, so very large files can remain slow while editing or scrolling.
+The native shell uses eframe's wgpu renderer. Use **View → Light Theme** to switch palettes. File and folder actions open native pickers. Documents above 64 KiB load on a worker thread and disable wrapping; Rust syntax coloring remains enabled through 1 MiB, while other formats use plain text above 64 KiB. The gutter paints visible rows only. The language service separately skips synchronization and diagnostics above 512 KiB. egui's text widget still lays out the full active buffer, so very large files can remain slow while editing or scrolling; the 6-second open report has not been retimed after the latest changes.
+
+Language completions appear as muted inline text at the caret. Press **Tab** to accept, use **Up/Down** to cycle candidates, and **Escape** to dismiss.
+
+## Platform release builds
+
+The `Release builds` GitHub Actions workflow builds x86_64 Arch (`.pkg.tar.zst`), Debian (`.deb`), RPM (`.rpm`), and Windows (`.zip`) artifacts on native runners when changes are pushed to `main` or a `v*` tag. Arch packaging metadata is in `PKGBUILD`; Debian and RPM metadata are in `Cargo.toml`. Release artifacts are attached to the workflow run.
 
 ## Syntax highlighting
 

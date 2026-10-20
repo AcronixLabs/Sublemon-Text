@@ -1,0 +1,26 @@
+pkgname=sublemon
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='A clean-room Rust text editor'
+arch=('x86_64')
+url='https://github.com/AcronixLabs/Sublemon-Text'
+license=('GPL3')
+depends=('gcc-libs' 'glibc' 'libxkbcommon' 'wayland' 'libx11' 'libxcb' 'libxrandr' 'libxcursor' 'libxi' 'mesa' 'vulkan-icd-loader')
+source=()
+sha256sums=()
+
+build() {
+  cd "$startdir/../.."
+  cargo build --release --locked --bins
+}
+
+package() {
+  local root="$startdir/../.."
+  install -Dm755 "$root/target/release/sublemon" "$pkgdir/usr/bin/sublemon"
+  install -Dm755 "$root/target/release/sublemon-lsp" "$pkgdir/usr/bin/sublemon-lsp"
+  install -Dm644 "$root/icon.png" "$pkgdir/usr/share/icons/hicolor/256x256/apps/sublemon.png"
+  install -Dm644 "$root/assets/linux/sublemon.desktop" "$pkgdir/usr/share/applications/sublemon.desktop"
+  install -Dm644 "$root/LICENSE" "$pkgdir/usr/share/licenses/sublemon/LICENSE"
+  install -Dm644 "$root/README.md" "$pkgdir/usr/share/doc/sublemon/README.md"
+  install -Dm644 "$root/THIRD_PARTY_NOTICES.md" "$pkgdir/usr/share/doc/sublemon/THIRD_PARTY_NOTICES.md"
+}

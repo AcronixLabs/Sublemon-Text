@@ -11,7 +11,8 @@ struct CachedLayout {
     galley: std::sync::Arc<egui::Galley>,
 }
 
-const LARGE_FILE_PLAIN_TEXT_LIMIT: usize = 512 * 1024;
+pub const FAST_TEXT_PATH_LIMIT: usize = 64 * 1024;
+const LARGE_RUST_HIGHLIGHT_LIMIT: usize = 1024 * 1024;
 
 pub fn layout_cached(
     context: &Context,
@@ -34,7 +35,17 @@ pub fn layout_cached(
     }
 
     let foreground = foreground(light);
-    let job = if text.len() > LARGE_FILE_PLAIN_TEXT_LIMIT {
+    let rust_source = path
+        .as_deref()
+        .and_then(Path::extension)
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("rs"));
+    let syntax_limit = if rust_source {
+        LARGE_RUST_HIGHLIGHT_LIMIT
+    } else {
+        FAST_TEXT_PATH_LIMIT
+    };
+    let job = if text.len() > syntax_limit {
         // Syntax tokenization and per-token layout are expensive for huge buffers.
         // Keep a single style run so editing remains responsive.
         egui::text::LayoutJob::simple(

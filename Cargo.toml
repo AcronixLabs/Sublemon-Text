@@ -4,9 +4,46 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.95"
 description = "A clean-room Rust text editor"
+license = "GPL-3.0-only"
 
 [dependencies]
 eframe = "0.36.2"
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 rfd = "0.17.2"
 serde_json = "1.0.154"
+
+# The editor shapes the active document on the UI thread. Optimizing the
+# dependency stack in dev builds keeps `cargo run` responsive on large buffers.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[package.metadata.deb]
+maintainer = "AcronixLabs"
+copyright = "2026, AcronixLabs"
+license-file = ["LICENSE", "0"]
+extended-description = "A clean-room Rust text editor with a native desktop interface."
+section = "editors"
+priority = "optional"
+depends = "$auto"
+assets = [
+    ["target/release/sublemon", "usr/bin/", "755"],
+    ["target/release/sublemon-lsp", "usr/bin/", "755"],
+    ["icon.png", "usr/share/icons/hicolor/256x256/apps/sublemon.png", "644"],
+    ["assets/linux/sublemon.desktop", "usr/share/applications/", "644"],
+    ["README.md", "usr/share/doc/sublemon/README.md", "644"],
+    ["THIRD_PARTY_NOTICES.md", "usr/share/doc/sublemon/THIRD_PARTY_NOTICES.md", "644"],
+]
+
+[package.metadata.generate-rpm]
+license = "GPL-3.0-only"
+assets = [
+    { source = "target/release/sublemon", dest = "/usr/bin/sublemon", mode = "755" },
+    { source = "target/release/sublemon-lsp", dest = "/usr/bin/sublemon-lsp", mode = "755" },
+    { source = "icon.png", dest = "/usr/share/icons/hicolor/256x256/apps/sublemon.png", mode = "644" },
+    { source = "assets/linux/sublemon.desktop", dest = "/usr/share/applications/sublemon.desktop", mode = "644" },
+    { source = "README.md", dest = "/usr/share/doc/sublemon/README.md", mode = "644", doc = true },
+    { source = "THIRD_PARTY_NOTICES.md", dest = "/usr/share/doc/sublemon/THIRD_PARTY_NOTICES.md", mode = "644", doc = true },
+]

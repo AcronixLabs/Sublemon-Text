@@ -2,6 +2,7 @@ use crate::app_state::AppState;
 use crate::document::Document;
 use crate::editor_metrics::LineMetrics;
 use crate::lsp::{LspClient, offset_from_position, uri_to_path};
+use crate::syntax::FAST_TEXT_PATH_LIMIT;
 use eframe::egui;
 use std::{
     collections::{HashMap, HashSet},
@@ -145,6 +146,7 @@ pub struct SublemonApp {
     completion_selection: usize,
     completion_document_id: Option<u64>,
     completion_cursor_offset: usize,
+    completion_anchor: Option<egui::Pos2>,
     hover_content: Option<String>,
     path_dialog: Option<PathDialog>,
     path_input: String,
@@ -167,6 +169,13 @@ pub struct SublemonApp {
 enum PathDialog {
     SaveAs,
     ImportFolder,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AutoPairResult {
+    NotHandled,
+    CursorOnly,
+    TextChanged,
 }
 
 impl Default for SublemonApp {
@@ -220,6 +229,7 @@ impl Default for SublemonApp {
             completion_selection: 0,
             completion_document_id: None,
             completion_cursor_offset: 0,
+            completion_anchor: None,
             hover_content: None,
             path_dialog: None,
             path_input: String::new(),
@@ -488,7 +498,7 @@ impl SublemonApp {
             .name("sublemon-file-open".into())
             .spawn(move || {
                 let result = Document::open(&task_path).map(|document| {
-                    let metrics = (document.text.len() > 512 * 1024)
+                    let metrics = (document.text.len() > FAST_TEXT_PATH_LIMIT)
                         .then(|| LineMetrics::new(&document.text, document.revision(), usize::MAX));
                     (document, metrics)
                 });
@@ -656,6 +666,7 @@ impl SublemonApp {
     fn request_completion_with_trigger(&mut self, trigger_kind: u8) {
         self.completion_items.clear();
         self.completion_document_id = None;
+        self.completion_anchor = None;
         let Some(document) = self.documents.get(self.active_document) else {
             return;
         };
@@ -753,6 +764,7 @@ impl SublemonApp {
         self.completion_items.clear();
         self.completion_selection = 0;
         self.completion_document_id = None;
+        self.completion_anchor = None;
         self.set_editor_cursor(context, new_offset);
         if let (Some(lsp), Some(path)) = (&mut self.lsp, path) {
             if let Err(error) = lsp.did_change(&path, &self.documents[self.active_document].text) {
@@ -908,7 +920,11 @@ impl SublemonApp {
                         .documents
                         .iter()
                         .find(|document| document.id == pending.document_id)
-                        .is_some_and(|document| document.text == pending.text_snapshot);
+                        .is_some_and(|document| document.text == pending.text_snapshot)
+                        && self
+                            .cursor_offsets
+                            .get(&pending.document_id)
+                            .is_some_and(|offset| *offset == pending.character_offset);
                     if unchanged {
                         self.completion_items =
                             completion_candidates(&message["result"], &pending.text_snapshot);
@@ -918,6 +934,10 @@ impl SublemonApp {
                         if self.completion_items.is_empty() {
                             self.completion_document_id = None;
                         }
+                    } else {
+                        self.completion_items.clear();
+                        self.completion_document_id = None;
+                        self.completion_anchor = None;
                     }
                 }
                 if let Some(document_id) = self.pending_hovers.remove(&id) {
@@ -1062,7 +1082,7 @@ impl eframe::App for SublemonApp {
                 (
                     input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp),
                     input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown),
-                    input.consume_key(egui::Modifiers::NONE, egui::Key::Enter),
+                    input.consume_key(egui::Modifiers::NONE, egui::Key::Tab),
                     input.consume_key(egui::Modifiers::NONE, egui::Key::Escape),
                 )
             });
@@ -1079,6 +1099,7 @@ impl eframe::App for SublemonApp {
             if dismiss {
                 self.completion_items.clear();
                 self.completion_document_id = None;
+                self.completion_anchor = None;
             }
         }
         let colors = ThemeColors::new(self.light_theme);
@@ -1326,6 +1347,7 @@ impl eframe::App for SublemonApp {
                 });
         }
 
+        let mut completion_anchor = None;
         let mut lsp_change = None;
         let mut request_completion_on_change = false;
         egui::CentralPanel::default_margins()
@@ -1372,7 +1394,7 @@ impl eframe::App for SublemonApp {
                 let content_width = ui.available_width();
                 let editor_width =
                     (content_width - gutter_width - ui.spacing().item_spacing.x).max(1.0);
-                let large_document = self.active_document().text.len() > 512 * 1024;
+                let large_document = self.active_document().text.len() > FAST_TEXT_PATH_LIMIT;
                 let effective_word_wrap = self.word_wrap && !large_document;
                 let chars_per_visual_line =
                     ((editor_width - 16.0) / (14.0 * 0.60)).floor().max(1.0) as usize;
@@ -1441,68 +1463,61 @@ impl eframe::App for SublemonApp {
                             });
                         } else {
                             ui.horizontal_top(|ui| {
-                                ui.allocate_ui_with_layout(
-                                    egui::vec2(gutter_width, content_height),
-                                    egui::Layout::top_down(egui::Align::Min),
-                                    |ui| {
-                                        let rect = ui.max_rect();
-                                        let painter = ui.painter();
-                                        painter.rect_filled(rect, 0.0, colors.gutter);
-                                        let line_height = 19.0;
-                                        let text_top = rect.top() + 8.0;
-                                        let clip = ui.clip_rect();
-                                        let first_row = ((clip.top() - text_top) / line_height)
-                                            .floor()
-                                            .max(0.0)
-                                            as usize;
-                                        let end_row = ((clip.bottom() - text_top) / line_height)
-                                            .ceil()
-                                            .max(first_row as f32)
-                                            as usize;
-                                        let visible_lines =
-                                            metrics.lines_in_visual_rows(first_row, end_row);
-                                        let active_line_color = if colors.is_light {
-                                            egui::Color32::from_rgb(222, 229, 240)
-                                        } else {
-                                            egui::Color32::from_rgb(70, 80, 94)
-                                        };
-                                        let number_color = if colors.is_light {
-                                            egui::Color32::from_rgb(105, 115, 130)
-                                        } else {
-                                            egui::Color32::from_rgb(118, 133, 153)
-                                        };
-                                        for index in visible_lines {
-                                            let line = index + 1;
-                                            let first_line_row = metrics.visual_row_start(index);
-                                            if line == self.cursor_line {
-                                                for row in first_line_row
-                                                    ..first_line_row
-                                                        + metrics.line_visual_rows(index)
-                                                {
-                                                    painter.rect_filled(
-                                                        egui::Rect::from_min_size(
-                                                            egui::pos2(
-                                                                rect.left(),
-                                                                text_top + row as f32 * line_height,
-                                                            ),
-                                                            egui::vec2(rect.width(), line_height),
-                                                        ),
-                                                        0.0,
-                                                        active_line_color,
-                                                    );
-                                                }
-                                            }
-                                            let y = text_top + first_line_row as f32 * line_height;
-                                            painter.text(
-                                                egui::pos2(rect.right() - 8.0, y),
-                                                egui::Align2::RIGHT_TOP,
-                                                line.to_string(),
-                                                egui::FontId::monospace(12.0),
-                                                number_color,
+                                let (_, rect) =
+                                    ui.allocate_space(egui::vec2(gutter_width, content_height));
+                                let painter = ui.painter_at(rect);
+                                painter.rect_filled(rect, 0.0, colors.gutter);
+                                let line_height = 19.0;
+                                let text_top = rect.top() + 8.0;
+                                let clip = ui.clip_rect();
+                                let first_row =
+                                    ((clip.top() - text_top) / line_height).floor().max(0.0)
+                                        as usize;
+                                let end_row = ((clip.bottom() - text_top) / line_height)
+                                    .ceil()
+                                    .max(first_row as f32)
+                                    as usize;
+                                let visible_lines =
+                                    metrics.lines_in_visual_rows(first_row, end_row);
+                                let active_line_color = if colors.is_light {
+                                    egui::Color32::from_rgb(222, 229, 240)
+                                } else {
+                                    egui::Color32::from_rgb(70, 80, 94)
+                                };
+                                let number_color = if colors.is_light {
+                                    egui::Color32::from_rgb(105, 115, 130)
+                                } else {
+                                    egui::Color32::from_rgb(118, 133, 153)
+                                };
+                                for index in visible_lines {
+                                    let line = index + 1;
+                                    let first_line_row = metrics.visual_row_start(index);
+                                    if line == self.cursor_line {
+                                        for row in first_line_row
+                                            ..first_line_row + metrics.line_visual_rows(index)
+                                        {
+                                            painter.rect_filled(
+                                                egui::Rect::from_min_size(
+                                                    egui::pos2(
+                                                        rect.left(),
+                                                        text_top + row as f32 * line_height,
+                                                    ),
+                                                    egui::vec2(rect.width(), line_height),
+                                                ),
+                                                0.0,
+                                                active_line_color,
                                             );
                                         }
-                                    },
-                                );
+                                    }
+                                    let y = text_top + first_line_row as f32 * line_height;
+                                    painter.text(
+                                        egui::pos2(rect.right() - 8.0, y),
+                                        egui::Align2::RIGHT_TOP,
+                                        line.to_string(),
+                                        egui::FontId::monospace(12.0),
+                                        number_color,
+                                    );
+                                }
                                 ui.allocate_ui_with_layout(
                                     egui::vec2(editor_width, content_height),
                                     egui::Layout::top_down(egui::Align::Min),
@@ -1534,22 +1549,31 @@ impl eframe::App for SublemonApp {
                                             ));
                                             state.store(ui.ctx(), editor_id);
                                         }
-                                        prepare_auto_pairs(ui.ctx(), editor_id, &mut document.text);
+                                        let mut pre_edit_changed = prepare_auto_pairs(
+                                            ui.ctx(),
+                                            editor_id,
+                                            &mut document.text,
+                                        ) == AutoPairResult::TextChanged;
                                         if prepare_enter_indentation(
                                             ui.ctx(),
                                             editor_id,
                                             &mut document.text,
                                         ) {
-                                            if let Some(mut state) =
-                                                egui::TextEdit::load_state(ui.ctx(), editor_id)
+                                            pre_edit_changed = true;
+                                        }
+                                        if pre_edit_changed {
+                                            self.completion_items.clear();
+                                            self.completion_document_id = None;
+                                            self.completion_anchor = None;
+                                            document.mark_changed();
+                                            if document.text.len() > FAST_TEXT_PATH_LIMIT {
+                                                self.line_metrics_pending
+                                                    .insert(document.id, Instant::now());
+                                            }
+                                            if document.text.len() <= 512 * 1024
+                                                && let Some(path) = document.path.clone()
                                             {
-                                                let end = document.text.chars().count();
-                                                state.cursor.set_char_range(Some(
-                                                    egui::text::CCursorRange::one(
-                                                        egui::text::CCursor::new(end),
-                                                    ),
-                                                ));
-                                                state.store(ui.ctx(), editor_id);
+                                                lsp_change = Some((path, document.text.clone()));
                                             }
                                         }
                                         let syntax_path = document.path.clone();
@@ -1579,6 +1603,9 @@ impl eframe::App for SublemonApp {
                                             .interactive(!document.read_only);
                                         let output = editor.show(ui);
                                         if output.response.changed() {
+                                            self.completion_items.clear();
+                                            self.completion_document_id = None;
+                                            self.completion_anchor = None;
                                             document.mark_changed();
                                             if document.text.len() > 512 * 1024 {
                                                 self.line_metrics_pending
@@ -1639,7 +1666,21 @@ impl eframe::App for SublemonApp {
                                         if let Some(cursor_range) = cursor_range {
                                             let cursor_index: usize =
                                                 cursor_range.primary.index.into();
+                                            let text_origin = output.galley_pos
+                                                - egui::vec2(output.galley.rect.left(), 0.0);
+                                            let cursor_rect = output
+                                                .galley
+                                                .pos_from_cursor(cursor_range.primary)
+                                                .translate(text_origin.to_vec2());
+                                            completion_anchor = Some(cursor_rect.left_top());
                                             self.cursor_offsets.insert(document.id, cursor_index);
+                                            if self.completion_document_id == Some(document.id)
+                                                && cursor_index != self.completion_cursor_offset
+                                            {
+                                                self.completion_items.clear();
+                                                self.completion_document_id = None;
+                                                self.completion_anchor = None;
+                                            }
                                             (self.cursor_line, self.cursor_column) =
                                                 metrics.cursor_line_column(cursor_index);
                                         }
@@ -1649,6 +1690,8 @@ impl eframe::App for SublemonApp {
                         }
                     });
             });
+
+        self.completion_anchor = completion_anchor;
 
         if let Some((path, text)) = lsp_change {
             if let Some(lsp) = self.lsp.as_mut() {
@@ -1761,39 +1804,55 @@ impl eframe::App for SublemonApp {
         }
 
         if !self.completion_items.is_empty() {
-            let items = self.completion_items.clone();
-            let mut selected = None;
-            egui::Window::new("Completions")
-                .collapsible(false)
-                .resizable(false)
-                .default_width(300.0)
-                .show(ui.ctx(), |ui| {
-                    ui.label("Choose a language server completion:");
-                    egui::ScrollArea::vertical()
-                        .max_height(280.0)
-                        .show(ui, |ui| {
-                            for (index, candidate) in items.iter().enumerate() {
-                                if ui
-                                    .selectable_label(
-                                        index == self.completion_selection,
-                                        &candidate.label,
-                                    )
-                                    .clicked()
-                                {
-                                    selected = Some(index);
-                                }
-                            }
-                        });
-                    if ui.button("Dismiss").clicked() {
-                        selected = Some(usize::MAX);
-                    }
-                });
-            if let Some(index) = selected {
-                if index != usize::MAX {
-                    self.apply_completion(ui.ctx(), index);
-                } else {
-                    self.completion_items.clear();
-                    self.completion_document_id = None;
+            let document = &self.documents[self.active_document];
+            if self.completion_document_id == Some(document.id)
+                && let (Some(candidate), Some(anchor)) = (
+                    self.completion_items.get(self.completion_selection),
+                    self.completion_anchor,
+                )
+            {
+                let offset = self
+                    .completion_cursor_offset
+                    .min(document.text.chars().count());
+                let prefix_start = completion_prefix_start(&document.text, offset);
+                let prefix: String = document
+                    .text
+                    .chars()
+                    .skip(prefix_start)
+                    .take(offset.saturating_sub(prefix_start))
+                    .collect();
+                let insertion = candidate.insert_text.lines().next().unwrap_or_default();
+                let suffix = insertion
+                    .strip_prefix(&prefix)
+                    .filter(|suffix| !suffix.is_empty())
+                    .unwrap_or(&candidate.label);
+                let suggestion: String = suffix.chars().take(64).collect();
+                if !suggestion.is_empty() {
+                    // Inline continuation at the caret: it stays visually quiet and
+                    // leaves the surrounding editor content unobstructed.
+                    let painter = ui.ctx().layer_painter(egui::LayerId::new(
+                        egui::Order::Foreground,
+                        egui::Id::new("sublemon_inline_completion"),
+                    ));
+                    let ghost = if colors.is_light {
+                        egui::Color32::from_rgb(139, 148, 161)
+                    } else {
+                        egui::Color32::from_rgb(112, 125, 145)
+                    };
+                    let text_rect = painter.text(
+                        anchor,
+                        egui::Align2::LEFT_TOP,
+                        suggestion,
+                        egui::FontId::monospace(14.0),
+                        ghost,
+                    );
+                    painter.text(
+                        text_rect.right_top() + egui::vec2(8.0, 2.0),
+                        egui::Align2::LEFT_TOP,
+                        "Tab ↹",
+                        egui::FontId::proportional(10.0),
+                        ghost,
+                    );
                 }
             }
         }
@@ -1937,15 +1996,19 @@ fn prepare_enter_indentation(
     true
 }
 
-fn prepare_auto_pairs(context: &egui::Context, editor_id: egui::Id, text: &mut String) -> bool {
+fn prepare_auto_pairs(
+    context: &egui::Context,
+    editor_id: egui::Id,
+    text: &mut String,
+) -> AutoPairResult {
     if !context.memory(|memory| memory.has_focus(editor_id)) {
-        return false;
+        return AutoPairResult::NotHandled;
     }
     let Some(mut state) = egui::TextEdit::load_state(context, editor_id) else {
-        return false;
+        return AutoPairResult::NotHandled;
     };
     let Some(range) = state.cursor.char_range() else {
-        return false;
+        return AutoPairResult::NotHandled;
     };
     let selected = range.as_sorted_char_range();
     let start_char: usize = selected.start.into();
@@ -1962,7 +2025,7 @@ fn prepare_auto_pairs(context: &egui::Context, editor_id: egui::Id, text: &mut S
         })
     });
     let Some((character, event_text)) = event else {
-        return false;
+        return AutoPairResult::NotHandled;
     };
     let pair = match character {
         '(' => Some(')'),
@@ -1973,7 +2036,17 @@ fn prepare_auto_pairs(context: &egui::Context, editor_id: egui::Id, text: &mut S
         '`' => Some('`'),
         _ => None,
     };
-    if let Some(close) = pair {
+    let result = if matches!(character, ')' | ']' | '}' | '"' | '\'' | '`')
+        && next_char == Some(character)
+    {
+        let caret = start_char + 1;
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::one(
+                egui::text::CCursor::new(caret),
+            )));
+        AutoPairResult::CursorOnly
+    } else if let Some(close) = pair {
         let selection = &text[start_byte..end_byte];
         let replacement = format!("{character}{selection}{close}");
         let caret_start = start_char + 1;
@@ -1985,25 +2058,17 @@ fn prepare_auto_pairs(context: &egui::Context, editor_id: egui::Id, text: &mut S
                 egui::text::CCursor::new(caret_start),
                 egui::text::CCursor::new(caret_end),
             )));
-    } else if matches!(character, ')' | ']' | '}' | '"' | '\'' | '`')
-        && next_char == Some(character)
-    {
-        let caret = start_char + 1;
-        state
-            .cursor
-            .set_char_range(Some(egui::text::CCursorRange::one(
-                egui::text::CCursor::new(caret),
-            )));
+        AutoPairResult::TextChanged
     } else {
-        return false;
-    }
+        return AutoPairResult::NotHandled;
+    };
     state.store(context, editor_id);
     context.input_mut(|input| {
         input
             .events
             .retain(|event| !matches!(event, egui::Event::Text(value) if value == &event_text));
     });
-    true
+    result
 }
 
 fn markdown_preview_text(line: &str) -> egui::RichText {

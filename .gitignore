@@ -9,3 +9,9 @@
 
 # Rust build output
 /target/
+
+# Per-user local application state
+/.sublemon.json
+
+# Collected CI release artifacts
+/dist/
