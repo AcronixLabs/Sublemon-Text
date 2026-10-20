@@ -64,3 +64,9 @@ This worktree contains broad, intentional deletions of the previously vendored s
 - The crate and package metadata still say `0.1.0`; synchronize those with
   release `0.01` before publishing if package-manager version consistency is
   required.
+
+## macOS DMG and Save picker
+
+- `.github/workflows/release-builds.yml` now has a macOS 15 job that cross-builds universal Apple Silicon and Intel binaries, assembles an unsigned `.app`, and creates a compressed unsigned DMG. The artifact is uploaded by CI and included in tagged releases. It has not yet been exercised on a macOS runner.
+- Save and Save As now open the native save picker. The picker starts in the current file's parent directory and preselects its name; Ctrl+S/Command+S and the close-confirmation Save action use it too. Selecting the current path uses the document's normal external-change guard.
+- No local macOS/DMG build is possible on this Linux host; rely on the hosted macOS runner and inspect its uploaded artifact before claiming success.

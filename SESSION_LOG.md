@@ -75,3 +75,15 @@
 - The interrupted earlier Arch build left local package archives in the worktree;
   the release flow ignores them and only publishes artifacts created by CI.
 - No new package builds run locally in this step.
+
+## macOS DMG and native Save picker
+
+- Added a macOS 15 Actions job that builds ARM64 and Intel targets, combines the
+  binaries into universal executables, creates an unsigned `.app` with the
+  supplied icon, and packages it as a compressed unsigned DMG. Tagged releases
+  include the DMG; regular CI runs upload it as a workflow artifact.
+- Changed Save, Save As, Ctrl+S/Command+S, and Save during close confirmation to
+  open the platform's native save dialog. Existing file path/name are used as
+  the dialog defaults, and saving back to that same path keeps the disk-change
+  check.
+- No macOS build has run yet; the workflow needs a hosted macOS runner.

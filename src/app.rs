@@ -167,7 +167,6 @@ pub struct SublemonApp {
 
 #[derive(Clone, Copy)]
 enum PathDialog {
-    SaveAs,
     ImportFolder,
 }
 
@@ -1012,13 +1011,28 @@ impl SublemonApp {
     }
 
     fn save_active(&mut self) {
-        let result = self.documents[self.active_document].save();
-        self.set_save_result(result);
-    }
+        let index = self.active_document;
+        let document = &self.documents[index];
+        let mut picker = rfd::FileDialog::new();
+        if let Some(path) = document.path.as_deref() {
+            if let Some(parent) = path.parent() {
+                picker = picker.set_directory(parent);
+            }
+            if let Some(name) = path.file_name() {
+                picker = picker.set_file_name(name.to_string_lossy().into_owned());
+            }
+        } else {
+            picker = picker.set_file_name(&document.title(index + 1));
+        }
 
-    fn save_active_as(&mut self, path: PathBuf) {
-        let result = self.documents[self.active_document].save_as(&path);
-        self.set_save_result(result);
+        if let Some(path) = picker.save_file() {
+            let result = if self.documents[index].path.as_deref() == Some(path.as_path()) {
+                self.documents[index].save()
+            } else {
+                self.documents[index].save_as(&path)
+            };
+            self.set_save_result(result);
+        }
     }
 
     fn set_save_result(&mut self, result: std::io::Result<()>) {
@@ -1042,14 +1056,18 @@ impl eframe::App for SublemonApp {
         self.poll_file_opens();
         self.ensure_language_server_for_active_document();
         self.poll_language_server(ui.ctx());
-        let (definition, references, back, completion) = ui.input_mut(|input| {
+        let (definition, references, back, completion, save) = ui.input_mut(|input| {
             (
                 input.consume_key(egui::Modifiers::NONE, egui::Key::F12),
                 input.consume_key(egui::Modifiers::SHIFT, egui::Key::F12),
                 input.consume_key(egui::Modifiers::ALT, egui::Key::ArrowLeft),
                 input.consume_key(egui::Modifiers::CTRL, egui::Key::Space),
+                input.consume_key(egui::Modifiers::COMMAND, egui::Key::S),
             )
         });
+        if save {
+            self.save_active();
+        }
         let toggle_markdown_preview = ui.input_mut(|input| {
             let pressed = input.events.iter().any(|event| matches!(event,
                 egui::Event::Key { key: egui::Key::V, pressed: true, modifiers, .. }
@@ -1129,17 +1147,11 @@ impl eframe::App for SublemonApp {
                     });
                     ui.separator();
                     if ui.button("Save").clicked() {
-                        if self.documents[self.active_document].path.is_some() {
-                            self.save_active();
-                        } else {
-                            self.path_input.clear();
-                            self.path_dialog = Some(PathDialog::SaveAs);
-                        }
+                        self.save_active();
                         ui.close();
                     }
                     if ui.button("Save As…").clicked() {
-                        self.path_input.clear();
-                        self.path_dialog = Some(PathDialog::SaveAs);
+                        self.save_active();
                         ui.close();
                     }
                     if ui.button("Revert File").clicked() {
@@ -1708,10 +1720,7 @@ impl eframe::App for SublemonApp {
         }
 
         if let Some(dialog) = self.path_dialog {
-            let title = match dialog {
-                PathDialog::SaveAs => "Save As",
-                PathDialog::ImportFolder => "Add Folder to Project",
-            };
+            let title = "Add Folder to Project";
             let mut open = true;
             let mut submit = false;
             let mut cancel = false;
@@ -1720,10 +1729,7 @@ impl eframe::App for SublemonApp {
                 .resizable(false)
                 .open(&mut open)
                 .show(ui.ctx(), |ui| {
-                    ui.label(match dialog {
-                        PathDialog::SaveAs => "Enter a file path:",
-                        PathDialog::ImportFolder => "Enter a folder path:",
-                    });
+                    ui.label("Enter a folder path:");
                     let response = ui
                         .add(egui::TextEdit::singleline(&mut self.path_input).desired_width(360.0));
                     if response.lost_focus()
@@ -1744,7 +1750,6 @@ impl eframe::App for SublemonApp {
                 let path = PathBuf::from(self.path_input.trim());
                 if !path.as_os_str().is_empty() {
                     match dialog {
-                        PathDialog::SaveAs => self.save_active_as(path),
                         PathDialog::ImportFolder => self.import_folder(path),
                     }
                 }
@@ -1898,13 +1903,7 @@ impl eframe::App for SublemonApp {
                 });
             if save {
                 self.active_document = index;
-                if self.documents[index].path.is_some() {
-                    self.save_active();
-                } else {
-                    self.active_document = index;
-                    self.path_input.clear();
-                    self.path_dialog = Some(PathDialog::SaveAs);
-                }
+                self.save_active();
             } else if discard {
                 self.documents[index].discard_changes();
                 self.close_confirmation = None;
