@@ -54,14 +54,13 @@ Remaining performance limitation: egui's built-in multiline `TextEdit` still lay
 This worktree contains broad, intentional deletions of the previously vendored syntax package tree and importer alongside source, dependency, documentation, welcome-state, and LSP edits. Preserve these changes. Do not reset or broadly restore the worktree. `.sublemon.json` is an existing untracked project settings file; inspect before editing it.
 # Release script
 
-- `release.sh` coordinates releases through GitHub Actions, so package builds
-  run on native CI runners rather than on the developer machine.
-- It pushes the current clean branch, creates and pushes `v0.01` (override with
-  `RELEASE_VERSION=...`), waits for `release-builds.yml`, downloads CI artifacts,
-  then creates a GitHub release with the Debian, Arch, RPM, Windows executables,
-  and Windows archive.
-- Requires `git`, authenticated `gh`, an `origin` remote, and a committed,
-  clean worktree. It intentionally refuses existing local tags/releases.
-- The crate and package metadata currently say `0.1.0`; synchronize those with
+- `release.sh` pushes the current clean branch and `v0.01` (override with
+  `RELEASE_VERSION=...`) over the configured HTTPS Git remote, then waits for
+  the public GitHub release page to appear. It performs no local builds.
+- The tag-triggered `publish` job creates the GitHub release with its
+  repository token after the native Arch, Debian, RPM, and Windows builds pass.
+- Requires HTTPS Git push access, `curl`, `python3`, an `origin` remote, and a
+  committed clean worktree. It refuses existing local or remote release tags.
+- The crate and package metadata still say `0.1.0`; synchronize those with
   release `0.01` before publishing if package-manager version consistency is
   required.

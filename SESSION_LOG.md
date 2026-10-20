@@ -69,11 +69,9 @@
 - Remaining performance issue: egui TextEdit still lays out the whole document, and first-display latency was not measured after these changes. The 6-second report remains unresolved pending viewport-virtualized text rendering.
 # Release orchestration
 
-- Added executable `release.sh` to push the current branch and `v0.01`, wait for
-  the GitHub Actions native build workflow, gather `.deb`, `.pkg.tar.zst`, `.rpm`,
-  `.exe`, and `.zip` artifacts, and create a GitHub release with generated notes.
-- Extended the Windows workflow artifact to include both `.exe` binaries as
-  well as the portable zip. Added local state and collected release files to
-  `.gitignore`.
-- Did not run any package builds or publish a release in this environment.
-- Validation: shell syntax check and diff review only.
+- Updated the release path to push the branch and `v0.01` over HTTPS and wait
+  for the tag workflow to publish. The workflow creates the release using its
+  repository token after all native package jobs succeed.
+- The interrupted earlier Arch build left local package archives in the worktree;
+  the release flow ignores them and only publishes artifacts created by CI.
+- No new package builds run locally in this step.

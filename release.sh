@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# Publish a versioned release using native GitHub Actions runners. This script
-# only orchestrates remote builds; it does not build packages on this machine.
+# Publish using native GitHub Actions runners. This script only pushes Git refs
+# and waits for CI; it does not build packages on this machine.
 RELEASE_VERSION="${RELEASE_VERSION:-0.01}"
 TAG="v${RELEASE_VERSION}"
-WORKFLOW="release-builds.yml"
+REPO="AcronixLabs/Sublemon-Text"
 ROOT="$(git rev-parse --show-toplevel)"
 cd "$ROOT"
 
 command -v git >/dev/null || { echo "git is required" >&2; exit 1; }
-command -v gh >/dev/null || { echo "GitHub CLI (gh) is required" >&2; exit 1; }
-gh auth status >/dev/null
+command -v curl >/dev/null || { echo "curl is required" >&2; exit 1; }
+command -v python3 >/dev/null || { echo "python3 is required" >&2; exit 1; }
 
 BRANCH="$(git branch --show-current)"
 if [[ -z "$BRANCH" ]]; then
@@ -27,50 +27,27 @@ if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
   echo "Local tag $TAG already exists; release tags are immutable." >&2
   exit 1
 fi
-if gh release view "$TAG" >/dev/null 2>&1; then
-  echo "GitHub release $TAG already exists; refusing to overwrite it." >&2
+if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+  echo "Remote tag $TAG already exists; release tags are immutable." >&2
   exit 1
 fi
 
-echo "Pushing $BRANCH and creating release tag $TAG..."
+echo "Pushing $BRANCH and creating release tag $TAG over HTTPS..."
 git push origin "$BRANCH"
 git tag -a "$TAG" -m "Sublemon $RELEASE_VERSION"
 git push origin "$TAG"
-COMMIT="$(git rev-parse "$TAG^{commit}")"
 
-echo "Waiting for the native release builds for $TAG..."
-RUN_ID=""
-for attempt in $(seq 1 60); do
-  RUN_ID="$(gh run list --workflow "$WORKFLOW" --commit "$COMMIT" --json databaseId,headSha --jq "[.[] | select(.headSha == \"$COMMIT\")][0].databaseId // empty")"
-  [[ -n "$RUN_ID" ]] && break
-  sleep 5
+echo "Waiting for GitHub Actions to build packages and publish $TAG..."
+API_URL="https://api.github.com/repos/$REPO/releases/tags/$TAG"
+for attempt in $(seq 1 90); do
+  if curl --fail --silent --max-time 15 "$API_URL" 2>/dev/null \
+    | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if d.get("html_url") and not d.get("draft", True) else 1)'; then
+    echo "Release published: https://github.com/$REPO/releases/tag/$TAG"
+    exit 0
+  fi
+  sleep 20
 done
-if [[ -z "$RUN_ID" ]]; then
-  echo "No $WORKFLOW run appeared for commit $COMMIT." >&2
-  exit 1
-fi
-gh run watch "$RUN_ID" --exit-status
 
-DIST="$ROOT/dist/release-$RELEASE_VERSION"
-mkdir -p "$DIST/artifacts" "$DIST/packages"
-gh run download "$RUN_ID" --dir "$DIST/artifacts"
-
-# Keep all requested native packages and the Windows executable/archive.
-while IFS= read -r -d '' artifact; do
-  cp -f "$artifact" "$DIST/packages/"
-done < <(find "$DIST/artifacts" -type f \( \
-  -name '*.deb' -o -name '*.pkg.tar.zst' -o -name '*.rpm' -o \
-  -name '*.exe' -o -name '*.zip' \) -print0)
-
-shopt -s nullglob
-ASSETS=("$DIST/packages"/*)
-if (( ${#ASSETS[@]} == 0 )); then
-  echo "The workflow completed but produced no release assets." >&2
-  exit 1
-fi
-
-echo "Creating GitHub release $TAG with ${#ASSETS[@]} assets..."
-gh release create "$TAG" "${ASSETS[@]}" \
-  --title "Sublemon $RELEASE_VERSION" \
-  --generate-notes
-echo "Release published: $(gh release view "$TAG" --json url --jq .url)"
+echo "The refs were pushed, but the release did not appear within 30 minutes." >&2
+echo "Check the Actions run for tag $TAG: https://github.com/$REPO/actions" >&2
+exit 1
