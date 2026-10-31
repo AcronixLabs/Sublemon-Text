@@ -20,7 +20,7 @@ Build **Sublemon**, an original, clean-room text editor written in Rust. It may 
 - At runtime, subcli may read user-owned Sublime Text packages (settings, keymaps, snippets, and syntax metadata) for interoperability.
 - Do not bundle, redistribute, or commit Sublime Text proprietary assets, package archives, or extracted application data. Import only from paths the user already owns.
 - Do not execute Sublime Text Python plugins. Only declarative package data is read.
-- The default subcli configuration must remain usable with a stock Neovim and no third-party Neovim plugins.
+- The default subcli configuration may include third‑party Neovim plugins such as LazyVim.
 
 ## Engineering conventions
 

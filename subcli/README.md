@@ -26,7 +26,19 @@ Unix:
 ./subcli/install.sh
 ```
 
-This installs to `$HOME/.local/share/subcli` and `$HOME/.local/bin/subcli` by default. Set `PREFIX` to change the prefix.
+ This installs to `$HOME/.local/share/subcli` and `$HOME/.local/bin/subcli` by default. Set `PREFIX` to change the prefix.
+
+### Full LazyVim configuration
+If you want the full LazyVim experience, clone the LazyVim repository into your subcli config directory:
+
+```sh
+git clone https://github.com/LazyVim/LazyVim.git $HOME/.config/subcli/lazyvim
+```
+
+The launcher will automatically detect the `lazyvim` directory and load LazyVim on startup, while still preserving Sublime‑package imports.
+
+**Note:** Enabling LazyVim adds many third‑party plugins; the clean‑room constraints apply only to the Rust Sublemon app, not to subcli.
+
 
 Arch:
 

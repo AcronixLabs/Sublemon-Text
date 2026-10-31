@@ -20,6 +20,13 @@ require("subcli.commands").setup()
 require("subcli.keymaps").setup()
 require("subcli.sublime").setup()
 
+-- Load LazyVim if present
+local lazyvim_dir = vim.fn.expand('~/.config/subcli/lazyvim')
+if vim.fn.isdirectory(lazyvim_dir) == 1 then
+  vim.opt.rtp:append(lazyvim_dir)
+  pcall(require, 'lazyvim')
+end
+
 local user_config = vim.env.SUBCLI_USER_CONFIG
 if not user_config and vim.env.NVIM_APPNAME == "subcli" then
   user_config = joinpath(vim.fn.stdpath("config"), "user.lua")
