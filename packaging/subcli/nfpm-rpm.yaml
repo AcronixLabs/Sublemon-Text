@@ -1,0 +1,25 @@
+name: subcli
+arch: noarch
+platform: linux
+version: 0.1.0
+section: editors
+priority: optional
+maintainer: Acronix Labs <maintainers@acronixlabs.com>
+description: Sublime-like modal Neovim distribution
+vendor: Acronix Labs
+homepage: https://github.com/AcronixLabs/Sublemon-Text
+license: GPL-3.0-only
+depends:
+  - neovim >= 0.9
+contents:
+  - src: ../../dist/subcli-stage/usr/bin/subcli
+    dst: /usr/bin/subcli
+    file_info:
+      mode: 0755
+  - src: ../../dist/subcli-stage/usr/share/subcli/
+    dst: /usr/share/subcli
+    type: tree
+  - src: ../../dist/subcli-stage/usr/share/doc/subcli/README.md
+    dst: /usr/share/doc/subcli/README.md
+  - src: ../../dist/subcli-stage/usr/share/licenses/subcli/LICENSE
+    dst: /usr/share/licenses/subcli/LICENSE

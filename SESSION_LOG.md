@@ -87,3 +87,12 @@
   the dialog defaults, and saving back to that same path keeps the disk-change
   check.
 - No macOS build has run yet; the workflow needs a hosted macOS runner.
+
+## 2026-10-31 — Subcli Neovim distribution
+
+- Added `subcli/`, a parallel terminal distribution built on Neovim with VI modal editing, Sublime-like defaults, a Sublime-inspired theme, and no nano-style shortcuts.
+- Added declarative interoperability with user-owned Sublime packages: `.sublime-settings`, `.sublime-keymap`, `.sublime-snippet`, and `.sublime-syntax` file-extension metadata. Sublime Python plugins, `.sublime-commands`, build systems, and UI themes are intentionally not loaded.
+- Added Unix and Windows launchers, a Unix installer, an Arch `PKGBUILD`, nFPM configs for Debian/RPM, portable Unix/Windows archives, and a `Subcli` GitHub Actions workflow with headless tests.
+- Updated `AGENTS.md` to keep the Rust clean-room rules while documenting the scoped subcli exception. Updated `PLAN.md` and `README.md`.
+- Verified Lua syntax with `luac -p`, `./subcli/test.sh` (settings, keymaps, snippets, syntax associations, snippet expansion), the launcher, the installer, and the help/health/packages commands in headless Neovim 0.12.5.
+- Built and inspected the Arch package with `makepkg`, built Debian and RPM packages with nFPM 2.48.0, and assembled/tested the portable Unix archive. The Windows batch launcher and the new CI workflow have not been exercised.

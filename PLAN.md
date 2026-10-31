@@ -101,6 +101,16 @@ This is a staged plan. Each milestone should leave a runnable, coherent applicat
 - Verify clean installs, upgrades, workspace migration, and uninstall behavior.
 - Publish source and binaries under a license chosen for Sublemon; do not include proprietary Sublime Text material.
 
+## Subcli terminal distribution
+
+The user approved a parallel terminal product, **subcli**, built on Neovim instead of extending the Rust application. It targets the same non-Android platforms (Arch, Debian, RPM, Windows, and macOS), uses VI modal editing with Sublime-like keybindings, and imports declarative data from Sublime packages the user already owns.
+
+- Ship a self-contained Lua configuration under `subcli/` that works with a stock Neovim and no third-party Neovim plugins.
+- Provide Sublime-like defaults for save/open/find/command palette/line operations while keeping normal, insert, visual, and command modes.
+- Read user-owned `.sublime-settings`, `.sublime-keymap`, `.sublime-snippet`, and `.sublime-syntax` metadata for settings, keybindings, snippets, and file-extension associations. Do not bundle proprietary assets or execute Sublime Python plugins.
+- Package `subcli` as an Arch package plus portable Unix and Windows archives, with CI coverage.
+- Keep the Rust Sublemon app and its clean-room constraints unchanged.
+
 ## Milestone tracking
 
 | Step | Status | Notes |
@@ -122,6 +132,9 @@ Native x86_64 package builds are described by the GitHub Actions workflow: Arch,
 | 9. Extensibility/config | Planned | No editor package archive compatibility is included. Design Sublemon-native settings and extension interfaces independently. |
 | 10. Reliability/performance | In progress | File reads moved to a worker, duplicate saved text and duplicate open-time hashing were removed, large-file syntax/wrapping and eager gutter painting were reduced. Need repeatable large-file benchmarks and a viewport-based text buffer to address egui's remaining full-document layout cost. |
 | 11. Packaging/release | Not started | |
+| Subcli terminal distribution | In progress | Neovim-based modal distribution with Sublime-like defaults, declarative Sublime package interoperability, Arch packaging, portable Unix/Windows archives, and CI tests. |
+
+Subcli packaging is separate from the Rust app: `packaging/subcli/arch/PKGBUILD` builds the Arch package, `packaging/subcli/nfpm-*.yaml` builds Debian and RPM packages, and the `Subcli` workflow produces portable Unix and Windows archives plus headless tests.
 
 ## References
 
