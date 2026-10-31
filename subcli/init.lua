@@ -20,6 +20,9 @@ require("subcli.commands").setup()
 require("subcli.keymaps").setup()
 require("subcli.sublime").setup()
 
+pcall(function()
+  vim.keymap.set('n', '<leader>e', function() vim.cmd('Explore') end, { silent=true, desc='Toggle file explorer' })
+end)
 require("subcli.lsp")
 local lazyvim_dir = vim.fn.expand('~/.config/subcli/lazyvim')
 if vim.fn.isdirectory(lazyvim_dir) == 1 then
