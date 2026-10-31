@@ -20,7 +20,7 @@ require("subcli.commands").setup()
 require("subcli.keymaps").setup()
 require("subcli.sublime").setup()
 
--- Load LazyVim if present
+require("subcli.lsp")
 local lazyvim_dir = vim.fn.expand('~/.config/subcli/lazyvim')
 if vim.fn.isdirectory(lazyvim_dir) == 1 then
   vim.opt.rtp:append(lazyvim_dir)

@@ -65,7 +65,10 @@ function M.setup()
 
   map("n", "<F1>", cmd("SubcliHelp"), "subcli help")
   map("n", "<C-S-r>", cmd("SubcliReload"), "Reload subcli")
-  map("n", "<C-S-e>", cmd("SubcliPackages"), "Sublime package status")
+  -- Toggle file tree (netrw)
+  map('n', '<leader>e', function()
+    vim.cmd('Explore')
+  end, 'Toggle file explorer')
 end
 
 return M
