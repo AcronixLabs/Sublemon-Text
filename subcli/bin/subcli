@@ -1,0 +1,23 @@
+#!/bin/sh
+set -eu
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+
+if [ -n "${SUBCLI_SHARE:-}" ]; then
+  config_dir=$SUBCLI_SHARE
+elif [ -f "$script_dir/../init.lua" ]; then
+  config_dir=$(CDPATH= cd -- "$script_dir/.." && pwd)
+elif [ -f "$script_dir/../share/subcli/init.lua" ]; then
+  config_dir=$(CDPATH= cd -- "$script_dir/../share/subcli" && pwd)
+elif [ -f "/usr/share/subcli/init.lua" ]; then
+  config_dir=/usr/share/subcli
+elif [ -f "/usr/local/share/subcli/init.lua" ]; then
+  config_dir=/usr/local/share/subcli
+else
+  echo "subcli: cannot locate init.lua; set SUBCLI_SHARE" >&2
+  exit 1
+fi
+
+NVIM_APPNAME=${NVIM_APPNAME:-subcli}
+export NVIM_APPNAME
+exec "${NVIM:-nvim}" -u "$config_dir/init.lua" "$@"

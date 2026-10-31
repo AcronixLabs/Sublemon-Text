@@ -1,0 +1,10 @@
+%YAML 1.2
+---
+name: Test
+file_extensions:
+  - foo
+scope: source.python
+contexts:
+  main:
+    - match: ''
+      push: scope:source.python

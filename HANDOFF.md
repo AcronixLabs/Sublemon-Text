@@ -70,3 +70,11 @@ This worktree contains broad, intentional deletions of the previously vendored s
 - `.github/workflows/release-builds.yml` now has a macOS 15 job that cross-builds universal Apple Silicon and Intel binaries, assembles an unsigned `.app`, and creates a compressed unsigned DMG. The artifact is uploaded by CI and included in tagged releases. It has not yet been exercised on a macOS runner.
 - Save and Save As now open the native save picker. The picker starts in the current file's parent directory and preselects its name; Ctrl+S/Command+S and the close-confirmation Save action use it too. Selecting the current path uses the document's normal external-change guard.
 - No local macOS/DMG build is possible on this Linux host; rely on the hosted macOS runner and inspect its uploaded artifact before claiming success.
+
+## Subcli terminal distribution
+
+- `subcli/` is a parallel Neovim-based terminal product. The Rust Sublemon app and its clean-room rules are unchanged; `AGENTS.md` documents the scoped subcli exception for Neovim and user-owned Sublime package data.
+- Run from a checkout with `./subcli/bin/subcli`; install for the current user with `./subcli/install.sh`; build the Arch package from `packaging/subcli/arch`.
+- Sublime interoperability reads `.sublime-settings`, `.sublime-keymap`, `.sublime-snippet`, and `.sublime-syntax` extension metadata from user-owned package roots. It does not execute Sublime Python plugins or bundle proprietary assets.
+- Verified locally with Neovim 0.12.5: `luac -p` over all Lua files, `./subcli/test.sh`, launcher and installed launcher in headless mode, snippet expansion, and the help/health/packages commands. Also built and inspected the Arch package, built Debian/RPM packages with nFPM, and tested the portable Unix archive. The Windows batch launcher and CI workflow have not been exercised.
+- Next: run the `Subcli` workflow, inspect the produced packages/archives, exercise the TUI interactively, and test on Neovim 0.9 if that remains a supported floor.

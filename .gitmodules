@@ -1,0 +1,3 @@
+[submodule "subcli/lazyvim"]
+	path = subcli/lazyvim
+	url = https://github.com/LazyVim/LazyVim.git

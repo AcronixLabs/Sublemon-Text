@@ -1,0 +1,5 @@
+<snippet>
+  <content><![CDATA[Hello ${1:world}]]></content>
+  <tabTrigger>hello</tabTrigger>
+  <scope>source.python</scope>
+</snippet>

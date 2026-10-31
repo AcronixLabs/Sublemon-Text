@@ -8,6 +8,23 @@ On first launch, Sublemon shows a welcome screen. Once a project is opened, its 
 
 Sublemon is an original Rust desktop editor with a compact project workspace, tabs, syntax coloring, and a local language service.
 
+## Subcli terminal editor
+
+`subcli` is a parallel terminal distribution built on Neovim. It keeps VI modal editing, replaces nano-style shortcuts with Sublime-like defaults, and can read declarative data from Sublime packages you already have installed. It does not include or execute Sublime Text itself.
+
+```sh
+# Run from a checkout
+./subcli/bin/subcli path/to/file
+
+# Install for the current user (Unix)
+./subcli/install.sh
+
+# Arch package
+cd packaging/subcli/arch && makepkg -si
+```
+
+On Windows, run `subcli\bin\subcli.cmd` from a checkout or the portable archive. Set `SUBCLI_SUBLIME_PACKAGES` to a platform-separated list of package roots to override the default Sublime package locations. See [subcli/README.md](subcli/README.md) for keybindings, interoperability scope, and limitations.
+
 ## Third-party assets
 
 The project tree uses icons from [Material Icon Theme](https://github.com/material-extensions/vscode-material-icon-theme), version 5.39.0, distributed under the MIT License. The original SVGs, rasterized PNGs, and license are in `assets/material-icon-theme/`; see its `ATTRIBUTION.md` for details.

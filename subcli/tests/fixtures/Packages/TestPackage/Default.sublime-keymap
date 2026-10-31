@@ -1,0 +1,4 @@
+[
+  { "keys": ["f9"], "command": "duplicate_line" },
+  { "keys": ["ctrl+shift+f9"], "command": "toggle_comment" },
+]

@@ -1,0 +1,21 @@
+pkgname=subcli
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Sublime-like modal Neovim distribution'
+arch=('any')
+url='https://github.com/AcronixLabs/Sublemon-Text'
+license=('GPL-3.0-only')
+depends=('neovim>=0.9')
+optdepends=('fd: fast file search' 'ripgrep: fast file search')
+source=()
+sha256sums=()
+
+package() {
+  local root="$startdir/../../.."
+  install -Dm755 "$root/subcli/bin/subcli" "$pkgdir/usr/bin/subcli"
+  install -Dm644 "$root/subcli/init.lua" "$pkgdir/usr/share/subcli/init.lua"
+  install -d "$pkgdir/usr/share/subcli/lua"
+  cp -R "$root/subcli/lua/." "$pkgdir/usr/share/subcli/lua/"
+  install -Dm644 "$root/subcli/README.md" "$pkgdir/usr/share/doc/subcli/README.md"
+  install -Dm644 "$root/LICENSE" "$pkgdir/usr/share/licenses/subcli/LICENSE"
+}
