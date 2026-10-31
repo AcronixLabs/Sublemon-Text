@@ -32,18 +32,21 @@ function M.setup()
   opt.listchars = { tab = "»·", trail = "·", nbsp = "·" }
   opt.fillchars = { eob = " " }
 
-  opt.expandtab = true
-  opt.shiftwidth = 4
-  opt.tabstop = 4
-  opt.softtabstop = 4
-  opt.shiftround = true
+  -- Classic auto‑indent / tab settings (preserve old behaviour)
+  opt.cindent = true
   opt.autoindent = true
   opt.smartindent = true
+  opt.expandtab = true
+  opt.shiftwidth = 2
+  opt.tabstop = 2
+  opt.softtabstop = 2
+  opt.shiftround = true
   opt.copyindent = true
   opt.preserveindent = true
-  opt.textwidth = 0
   opt.virtualedit = "block"
   opt.whichwrap = "b,s,h,l,<,>,[,]"
+  opt.backspace = 'indent,eol,start'
+  vim.cmd('filetype plugin indent on')
 
   opt.ignorecase = true
   opt.smartcase = true
