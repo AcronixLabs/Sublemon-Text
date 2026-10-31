@@ -25,7 +25,10 @@ function M.setup()
   opt.scrolloff = 5
   opt.sidescrolloff = 8
   opt.colorcolumn = ""
-  opt.list = false
+  -- NetRW appearance for side‑by‑side file tree
+  vim.g.netrw_banner = 0
+  vim.g.netrw_liststyle = 3   -- tree view
+  vim.g.netrw_winsize = 30    -- 30 % of the window width
   opt.listchars = { tab = "»·", trail = "·", nbsp = "·" }
   opt.fillchars = { eob = " " }
 

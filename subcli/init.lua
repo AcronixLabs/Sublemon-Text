@@ -20,10 +20,13 @@ require("subcli.commands").setup()
 require("subcli.keymaps").setup()
 require("subcli.sublime").setup()
 
-pcall(function()
-  vim.keymap.set('n', '<leader>e', function() vim.cmd('Explore') end, { silent=true, desc='Toggle file explorer' })
-end)
-require("subcli.lsp")
+vim.keymap.set('n', '<leader>e', function() vim.cmd('Lexplore') end, { silent=true, desc='Toggle file explorer' })
+vim.api.nvim_create_autocmd('VimEnter', {callback = function()
+  local arg = vim.fn.argv(0)
+  if arg ~= '' and vim.fn.isdirectory(arg) == 1 then
+    vim.cmd('Lexplore')
+  end
+end})
 local lazyvim_dir = vim.fn.expand('~/.config/subcli/lazyvim')
 if vim.fn.isdirectory(lazyvim_dir) == 1 then
   vim.opt.rtp:append(lazyvim_dir)
